@@ -1,64 +1,63 @@
 # docgen
 
-Turn a document PNG into an **editable HTML clone** that looks the same to a
-human reading them side by side.
+문서 PNG 한 장을 입력하면, 사람이 원본과 나란히 놓고 봤을 때 최대한 같아 보이는
+**편집 가능한 HTML**을 만든다.
 
-One loop, driven entirely by a Qwen VLM looking at real render output:
+핵심은 하나의 loop뿐이다. Qwen VLM이 실제 렌더 결과를 직접 보면서 판단한다.
 
 ```
 SOURCE PNG -> INITIAL HTML -> RENDER
                                 |
         +-----------------------+
         v
-      PLAN   (VLM, thinking ON)   pick the single biggest mismatch
-      ACTION (VLM, thinking OFF)  rewrite the HTML to fix it
-      APPLY  (Python)             de-fence + sanity check
-      RENDER (external service)   HTML -> PNG
+      PLAN   (VLM, thinking ON)   가장 중요한 불일치 하나를 고른다
+      ACTION (VLM, thinking OFF)  그 문제를 고치도록 HTML을 수정한다
+      APPLY  (Python)             fence 제거 + sanity check
+      RENDER (외부 renderer)      HTML -> PNG
       VERIFY (VLM, thinking ON)   keep / revert / done
         |
-        +-> keep   -> adopt candidate, next PLAN
-            revert -> restore previous HTML, next PLAN
+        +-> keep   -> candidate 채택, 다음 PLAN
+            revert -> 이전 HTML 복원, 다음 PLAN
             done   -> clone.html
 ```
 
-There is no CV pipeline, no heuristic rule set, no action DSL. The VLM sees the
-source and the actual render, decides, edits, and then judges its own edit
-against a fresh render.
+CV 파이프라인, heuristic rule 모음, action DSL은 없다. VLM이 원본과 실제 렌더를
+비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로 판정한다.
 
-## Requirements
+## 요구 사항
 
-* Python 3.11+ (uses `tomllib`); only third-party dependency is Pillow
-* The **Qwen VLM** OpenAI-compatible endpoint
-* The **HTML renderer** service (already running separately)
+* Python 3.11 이상 (`tomllib` 사용). 외부 의존성은 Pillow 하나뿐이다
+* **Qwen VLM** OpenAI 호환 endpoint
+* **HTML renderer** 서비스 (이미 별도로 실행 중인 것을 사용한다)
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Both services live on a private network. Everything must be run from a host
-that can reach `10.167.129.250:30164` and `10.167.129.230:30900`.
+두 서비스는 사내망에 있다. `10.167.129.250:30164` 와 `10.167.129.230:30900` 에
+접근 가능한 호스트에서 실행해야 한다.
 
-## Usage
+## 사용법
 
 ```bash
-python run.py doctor                          # check both services
-python run.py doctor --llm-image              # also verify a multimodal call
-python run.py render test.html -o test.png    # one-shot HTML -> PNG
-python run.py build sample.png -o out/sample  # the full loop
+python run.py doctor                          # 두 서비스 점검
+python run.py doctor --llm-image              # 멀티모달 호출까지 확인
+python run.py render test.html -o test.png    # HTML -> PNG 단발 렌더
+python run.py build sample.png -o out/sample  # 전체 loop 실행
 python run.py build sample.png --max-rounds 4 -v
 ```
 
-`doctor` exits non-zero if anything fails, and `build` refuses to start when the
-renderer health check fails — the renderer is a hard dependency of the loop.
+`doctor`는 하나라도 실패하면 non-zero로 종료한다. `build`는 renderer health
+검사가 실패하면 시작하지 않는다 — renderer는 이 loop의 필수 구성요소다.
 
-## Output
+## 산출물
 
 ```
 out/sample/
-  clone.html          final editable HTML
-  clone.png           its render
-  final_verify.json   terminal VERIFY verdict
-  summary.json        per-round decisions
+  clone.html          최종 편집 가능 HTML
+  clone.png           그 렌더 결과
+  final_verify.json   마지막 VERIFY 판정
+  summary.json        라운드별 결정 요약
   run.log
   rounds/
     bootstrap.html  bootstrap.png
@@ -69,55 +68,57 @@ out/sample/
     r02/  ...
 ```
 
-A round that fails APPLY or RENDER writes `error.json` instead of
-`candidate.png` and does not touch the current HTML.
+APPLY나 RENDER에서 실패한 라운드는 `candidate.png` 대신 `error.json`을 남기고,
+현재 HTML은 건드리지 않는다.
 
-## Configuration
+## 설정
 
-`config.toml` holds the endpoints and loop settings. Three environment
-variables override it for pointing at a relocated service:
-`DOCGEN_LLM_BASE_URL`, `DOCGEN_LLM_MODEL`, `DOCGEN_RENDERER_URL`.
+`config.toml`에 endpoint와 loop 설정이 들어 있다. 서비스 위치만 바꿔서 실행할
+때는 환경 변수 세 개로 덮어쓸 수 있다: `DOCGEN_LLM_BASE_URL`,
+`DOCGEN_LLM_MODEL`, `DOCGEN_RENDERER_URL`.
 
-## Files
+## 파일 구성
 
-| file | role |
+| 파일 | 역할 |
 | --- | --- |
 | `run.py` | CLI: `doctor`, `render`, `build` |
-| `config.py` | `config.toml` loading |
-| `llm.py` | Qwen client (stdlib `urllib`), message/image helpers |
-| `renderer.py` | `/health` + `/probe` client and the probe script |
-| `prompts.py` | the four stage prompts |
-| `pipeline.py` | bootstrap + the PLAN/ACTION/APPLY/RENDER/VERIFY loop |
-| `utils.py` | logging, image encoding, fence/think stripping, JSON extraction |
+| `config.py` | `config.toml` 로딩 |
+| `llm.py` | Qwen client (표준 `urllib`), message/image helper |
+| `renderer.py` | `/health` + `/probe` client와 probe script |
+| `prompts.py` | 4개 stage prompt |
+| `pipeline.py` | bootstrap과 PLAN/ACTION/APPLY/RENDER/VERIFY loop |
+| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출 |
 
-## Renderer contract
+## Renderer 계약
 
-`POST /probe` is sent exactly these fields, `probe_js` always included:
+`POST /probe`에는 아래 다섯 필드를 항상 함께 보낸다. `probe_js`는 생략하지
+않는다.
 
 ```json
 {"html": "...", "width": 800, "wait_ms": 400, "device_scale": 1.0, "probe_js": "() => {...}"}
 ```
 
-and expects `{"ok": true, "png_base64": "...", "metrics": {...}}`. Anything
-else raises `RendererError`. This project never starts its own browser.
+응답은 `{"ok": true, "png_base64": "...", "metrics": {...}}` 형태를 기대한다.
+그 밖의 경우는 모두 `RendererError`를 발생시킨다. 이 프로젝트는 자체 브라우저를
+띄우지 않는다.
 
-## Thinking control
+## Thinking 제어
 
-Thinking is set per stage via `chat_template_kwargs.enable_thinking`
-(BOOTSTRAP off, PLAN on, ACTION off, VERIFY on). If the server answers HTTP 400
-because of that key, the client drops it, retries once, logs a prominent
-warning, and from then on follows the server default — `summary.json` records
-this as `"thinking_control": false`.
+thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한다
+(BOOTSTRAP off, PLAN on, ACTION off, VERIFY on). 서버가 이 key 때문에 HTTP 400을
+반환하면 client가 key를 제거하고 한 번 재시도하며, 경고를 명확히 로그에 남긴
+뒤 이후로는 서버 기본값을 따른다. 이 경우 `summary.json`에
+`"thinking_control": false`로 기록된다.
 
-## Offline tests
+## 오프라인 테스트
 
-The service endpoints are not needed to exercise the loop's logic:
+loop 로직 검증에는 실제 서비스가 필요하지 않다.
 
 ```bash
 python3 tests/test_offline.py
 ```
 
-This starts an in-process mock renderer and mock Qwen implementing the same HTTP
-contracts, then drives a full build and asserts the artefact layout and the
-keep / revert / reject / done semantics. `tests/mock_services.py` is test-only
-and is never imported by the pipeline.
+동일한 HTTP 계약을 구현한 mock renderer와 mock Qwen을 in-process로 띄운 뒤
+전체 build를 돌려서, 산출물 구조와 keep / revert / reject / done 동작을
+검증한다. `tests/mock_services.py`는 테스트 전용이며 pipeline에서 import하지
+않는다.

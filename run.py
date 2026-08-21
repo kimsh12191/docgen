@@ -15,6 +15,11 @@ from utils import ensure_dir, read_text, setup_logging, write_bytes, write_json
 
 LOG = logging.getLogger("docgen.cli")
 
+STOP_REASON_KO = {
+    "done": "DONE (VERIFY가 완료로 판단)",
+    "max_rounds": "최대 라운드 도달",
+}
+
 
 # ---------------------------------------------------------------------- doctor
 
@@ -28,10 +33,10 @@ def cmd_doctor(args, cfg) -> int:
         if cfg.llm.model in models:
             print(f"OK {cfg.llm.model}")
         elif models:
-            print(f"FAIL model {cfg.llm.model!r} not served; available: {', '.join(models[:10])}")
+            print(f"FAIL 모델 {cfg.llm.model!r} 을(를) 서비스하지 않습니다. 사용 가능: {', '.join(models[:10])}")
             failures.append("llm-model")
         else:
-            print(f"FAIL /models returned no models ({cfg.llm.base_url})")
+            print(f"FAIL /models 가 모델 목록을 반환하지 않았습니다 ({cfg.llm.base_url})")
             failures.append("llm-model")
     except LLMError as exc:
         print(f"FAIL {exc}")
@@ -54,7 +59,7 @@ def cmd_doctor(args, cfg) -> int:
 
     print("[Renderer probe]")
     if not renderer_up:
-        print("SKIP renderer health failed")
+        print("SKIP renderer health 검사가 실패해서 건너뜁니다")
         failures.append("renderer-probe")
     else:
         try:
@@ -68,7 +73,7 @@ def cmd_doctor(args, cfg) -> int:
             failures.append("renderer-probe")
 
     if args.llm_image:
-        print("[LLM multimodal]")
+        print("[LLM 멀티모달]")
         try:
             from PIL import Image
 
@@ -86,15 +91,15 @@ def cmd_doctor(args, cfg) -> int:
             )
             print(f"OK {resp.content.strip()[:60]!r}")
             if not client.supports_thinking_flag:
-                print("WARN server rejected chat_template_kwargs; per-stage thinking control is off")
+                print("WARN 서버가 chat_template_kwargs 를 거부했습니다. stage별 thinking 제어가 비활성화됩니다")
         except (LLMError, OSError) as exc:
             print(f"FAIL {exc}")
             failures.append("llm-multimodal")
 
     if failures:
-        print(f"FAILED checks: {', '.join(failures)}")
+        print(f"실패한 검사: {', '.join(failures)}")
         return 1
-    print("All checks passed.")
+    print("모든 검사를 통과했습니다.")
     return 0
 
 
@@ -103,7 +108,7 @@ def cmd_doctor(args, cfg) -> int:
 def cmd_render(args, cfg) -> int:
     html_path = Path(args.html)
     if not html_path.exists():
-        print(f"error: {html_path} not found", file=sys.stderr)
+        print(f"오류: {html_path} 파일을 찾을 수 없습니다", file=sys.stderr)
         return 1
 
     renderer = RendererClient(
@@ -118,14 +123,14 @@ def cmd_render(args, cfg) -> int:
             wait_ms=cfg.renderer.wait_ms,
         )
     except RendererError as exc:
-        print(f"render failed: {exc}", file=sys.stderr)
+        print(f"렌더 실패: {exc}", file=sys.stderr)
         return 1
 
     out = Path(args.output or html_path.with_suffix(".png"))
     write_bytes(out, png)
     metrics_path = out.with_name(out.stem + "_metrics.json")
     write_json(metrics_path, metrics)
-    print(f"{out} ({len(png)} bytes)")
+    print(f"{out} ({len(png)} 바이트)")
     print(f"{metrics_path}")
     return 0
 
@@ -137,7 +142,7 @@ def cmd_build(args, cfg) -> int:
 
     source = Path(args.source)
     if not source.exists():
-        print(f"error: {source} not found", file=sys.stderr)
+        print(f"오류: {source} 파일을 찾을 수 없습니다", file=sys.stderr)
         return 1
 
     out_dir = ensure_dir(args.output or (Path("out") / source.stem))
@@ -155,52 +160,58 @@ def cmd_build(args, cfg) -> int:
     try:
         renderer.health()
     except RendererError as exc:
-        print(f"error: renderer health check failed, refusing to build: {exc}", file=sys.stderr)
+        print(f"오류: renderer health 검사에 실패해서 빌드를 시작하지 않습니다: {exc}", file=sys.stderr)
         return 1
 
     try:
         summary = Pipeline(cfg, out_dir).build(source)
     except (RendererError, LLMError, RuntimeError, FileNotFoundError) as exc:
         LOG.error("build failed: %s", exc)
-        print(f"build failed: {exc}", file=sys.stderr)
+        print(f"빌드 실패: {exc}", file=sys.stderr)
         return 1
 
-    print(f"clone.html      {summary['clone_html']}")
-    print(f"clone.png       {summary['clone_png']}")
-    print(f"stop_reason     {summary['stop_reason']}")
+    stop = STOP_REASON_KO.get(summary["stop_reason"], summary["stop_reason"])
+    print(f"clone.html : {summary['clone_html']}")
+    print(f"clone.png  : {summary['clone_png']}")
+    print(f"종료 사유   : {stop}")
     print(
-        "rounds          {rounds_run} run, {kept} kept, {reverted} reverted, "
-        "{rejected} rejected, {errors} errors".format(**summary)
+        "라운드     : 총 {rounds_run}회 / 반영(keep) {kept} / 되돌림(revert) {reverted} / "
+        "거부(reject) {rejected} / 오류 {errors}".format(**summary)
     )
+    if not summary["thinking_control"]:
+        print("주의: 서버가 chat_template_kwargs 를 거부해서 stage별 thinking 제어 없이 실행되었습니다")
     return 0
 
 
 # ------------------------------------------------------------------------ main
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="run.py", description="Document PNG -> editable HTML clone")
-    parser.add_argument("-c", "--config", help="path to config.toml")
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser = argparse.ArgumentParser(
+        prog="run.py",
+        description="문서 PNG -> 편집 가능한 HTML 클론",
+    )
+    parser.add_argument("-c", "--config", help="config.toml 경로")
+    parser.add_argument("-v", "--verbose", action="store_true", help="상세 로그 출력")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    doctor = sub.add_parser("doctor", help="check the LLM and renderer services")
+    doctor = sub.add_parser("doctor", help="LLM과 renderer 서비스 상태를 점검한다")
     doctor.add_argument(
         "--llm-image",
         action="store_true",
-        help="also send a tiny image to the VLM to verify multimodal calls",
+        help="작은 이미지를 실제로 보내 멀티모달 호출까지 확인한다",
     )
     doctor.set_defaults(func=cmd_doctor)
 
-    render = sub.add_parser("render", help="render an HTML file to PNG via the renderer")
-    render.add_argument("html")
-    render.add_argument("-o", "--output")
-    render.add_argument("--width", type=int)
+    render = sub.add_parser("render", help="HTML 파일을 renderer로 PNG로 렌더한다")
+    render.add_argument("html", help="렌더할 HTML 파일")
+    render.add_argument("-o", "--output", help="출력 PNG 경로")
+    render.add_argument("--width", type=int, help="렌더 폭 (기본값은 config)")
     render.set_defaults(func=cmd_render)
 
-    build = sub.add_parser("build", help="build an editable HTML clone of a document PNG")
-    build.add_argument("source")
-    build.add_argument("-o", "--output")
-    build.add_argument("--max-rounds", type=int)
+    build = sub.add_parser("build", help="문서 PNG로부터 편집 가능한 HTML 클론을 만든다")
+    build.add_argument("source", help="입력 문서 PNG")
+    build.add_argument("-o", "--output", help="출력 디렉터리 (기본값 out/<이름>)")
+    build.add_argument("--max-rounds", type=int, help="최대 라운드 수 (기본값은 config)")
     build.set_defaults(func=cmd_build)
 
     return parser
