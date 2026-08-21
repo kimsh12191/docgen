@@ -1,0 +1,20 @@
+[llm]
+base_url = "http://10.167.129.250:30164/v1"
+api_key = "EMPTY"
+model = "qwen3.5_397b_a17b"
+temperature = 0.2
+top_p = 0.8
+max_tokens = 32768
+timeout = 900
+retries = 3
+image_max_side = 1600
+
+[renderer]
+url = "http://10.167.129.230:30900"
+timeout = 180
+device_scale = 1.0
+width = 800
+wait_ms = 400
+
+[loop]
+max_rounds = 8

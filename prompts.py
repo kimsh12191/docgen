@@ -1,0 +1,108 @@
+"""Prompt text for the four VLM stages. Deliberately short."""
+
+from __future__ import annotations
+
+HISTORY_RULE = (
+    "Treat previous attempts as history, not facts.\n"
+    "Judge the current images first."
+)
+
+BOOTSTRAP_SYSTEM = (
+    "You recreate document images as clean, editable, self-contained HTML."
+)
+
+BOOTSTRAP_USER = """The image is a document page.
+Write HTML that recreates it as closely as you reasonably can in one pass.
+
+Rules:
+- Return one complete HTML document: <!doctype html> ... </html>.
+- Everything inline. No external CSS, fonts, images or scripts.
+- Wrap the page in a single root element with class "sheet", laid out for a
+  {width}px viewport width.
+- Reproduce all visible text content, and the overall structure: headings,
+  paragraphs, tables, columns, borders, alignment, relative font sizes.
+- Use real <table> markup for anything that looks like a table or a form grid.
+- Keep the markup editable: semantic tags and readable CSS, no absolute
+  positioning of every element, no base64 blobs.
+
+This is a first draft. It does not need to be pixel perfect; it needs to contain
+all the content and the correct large-scale structure so it can be refined later.
+
+Return only the HTML, nothing else."""
+
+PLAN_SYSTEM = "You are a meticulous visual diff analyst."
+
+PLAN_USER = """You are improving an HTML recreation of a document image.
+Image 1 is the source document.
+Image 2 is the current HTML render.
+Inspect both images carefully.
+Find the single most important mismatch that should be fixed next.
+Prefer a higher-level cause that explains multiple visible symptoms
+instead of listing many tiny differences.
+Decide whether the problem is global or local.
+Do not write HTML yet.
+Return JSON only:
+{
+  "scope": "global or local",
+  "target": "short description of the target",
+  "problem": "what visibly differs",
+  "cause": "most likely cause",
+  "goal": "what the next edit should achieve"
+}"""
+
+ACTION_SYSTEM = "You edit HTML precisely and conservatively."
+
+ACTION_USER = """Image 1 is the source document.
+Image 2 is the current HTML render.
+
+This is the plan for the next edit:
+{plan}
+
+Here is the current HTML:
+```html
+{html}
+```
+
+Apply the plan to the HTML.
+
+Change only what is necessary to achieve the plan.
+Preserve parts that already match.
+
+Return the complete modified HTML document, and nothing else."""
+
+VERIFY_SYSTEM = "You are a strict reviewer of visual document recreations."
+
+VERIFY_USER = """Image 1: source document
+Image 2: render before this edit
+Image 3: render after this edit
+The intended edit goal was:
+{plan}
+Compare carefully.
+Answer:
+1. Did the intended change actually happen?
+2. Is the new render visibly closer to the source?
+3. Did the edit introduce any meaningful regression elsewhere?
+Choose exactly one:
+- keep
+- revert
+- done
+Use "done" only when the remaining differences are minor enough
+that a person would regard the HTML as essentially the same document.
+Return JSON only:
+{{
+  "goal_achieved": true,
+  "improved": true,
+  "regression": false,
+  "decision": "keep|revert|done",
+  "reason": "short explanation",
+  "next_major_issue": "largest remaining mismatch, or empty"
+}}"""
+
+
+def history_block(entries: list[str], limit: int = 3) -> str:
+    """Short recent-history block for PLAN. Empty string when there is none."""
+    recent = [e for e in entries if e][-limit:]
+    if not recent:
+        return ""
+    lines = "\n".join(f"- {e}" for e in recent)
+    return f"Previous attempts:\n{lines}\n\n{HISTORY_RULE}"
