@@ -18,6 +18,7 @@ from utils import (
     extract_json,
     html_sanity_check,
     image_size,
+    side_by_side,
     truncate,
     write_bytes,
     write_json,
@@ -63,10 +64,18 @@ class Pipeline:
         out_dir: str | Path,
         notes: str = "",
         interactive: bool = False,
+        verify_mode: str | None = None,
     ) -> None:
+        # Asking to intervene implies intervening at VERIFY too, unless the
+        # caller names a mode. Keeps the library and the CLI in agreement.
+        if verify_mode is None:
+            verify_mode = "both" if interactive else "model"
+        if verify_mode not in ("model", "human", "both"):
+            raise ValueError(f"verify_mode must be model/human/both, got {verify_mode!r}")
         self.cfg = cfg
         self.notes = (notes or "").strip()
         self.interactive = interactive
+        self.verify_mode = verify_mode
         self.interventions = 0
         self.llm = QwenClient(cfg.llm)
         self.renderer = RendererClient(
@@ -242,6 +251,14 @@ class Pipeline:
 
     # -------------------------------------------------------- operator input
 
+    @staticmethod
+    def _input(prompt: str) -> str:
+        """Always reads. Used where a human verdict is the only source of truth."""
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
     def _ask(self, prompt: str) -> str:
         if not self.interactive:
             return ""
@@ -286,6 +303,35 @@ class Pipeline:
             self.interventions += 1
             LOG.info("VERIFY: operator overrode %s -> %s", verdict["model_decision"], answer)
         return verdict
+
+    def human_verify(self, plan: dict, compare_path: Path) -> dict:
+        """The operator is the verifier: no VERIFY call is made to the model."""
+        print("\n--- VERIFY (사람 판정) ---")
+        print(f"비교 이미지: {compare_path}")
+        print(f"이번 라운드 목표: {plan.get('goal', '') or plan.get('target', '')}")
+
+        decision = ""
+        for _ in range(3):
+            answer = self._input("판정 (keep=반영 / revert=되돌림 / done=완료): ").lower()
+            if answer in ("keep", "revert", "done"):
+                decision = answer
+                break
+            print("keep / revert / done 중 하나를 입력하세요.")
+        if not decision:
+            # Never adopt an unjudged edit.
+            LOG.warning("VERIFY: no usable operator verdict; defaulting to revert")
+            decision = "revert"
+
+        reason = self._input("이유 (선택, Enter=생략): ")
+        next_issue = self._input("다음에 고칠 것 (선택, Enter=생략): ")
+        self.interventions += 1
+        LOG.info("VERIFY: operator decided %s", decision)
+        return {
+            "decision": decision,
+            "reason": reason or "operator verdict",
+            "next_major_issue": next_issue,
+            "verified_by": "operator",
+        }
 
     # ------------------------------------------------------------------ loop
 
@@ -375,11 +421,27 @@ class Pipeline:
             write_bytes(rdir / "candidate.png", candidate_png)
             write_json(rdir / "metrics.json", metrics)
 
+            # One image a person can actually judge from.
+            compare_path = side_by_side(
+                [
+                    ("1. SOURCE", str(source_png)),
+                    ("2. BEFORE", current_png),
+                    ("3. AFTER (candidate)", candidate_png),
+                ],
+                rdir / "compare.png",
+            )
+
             # VERIFY
             try:
-                verdict = self.review_verify(
-                    self.verify(plan, source_png, current_png, candidate_png)
-                )
+                if self.verify_mode == "human":
+                    verdict = self.human_verify(plan, compare_path)
+                else:
+                    verdict = self.verify(plan, source_png, current_png, candidate_png)
+                    verdict["verified_by"] = "model"
+                    if self.verify_mode == "both":
+                        verdict = self.review_verify(verdict)
+                        if verdict.get("operator_override"):
+                            verdict["verified_by"] = "model+operator"
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
                 results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=bool(plan.get("operator_instruction"))))
@@ -396,12 +458,20 @@ class Pipeline:
                     decision,
                     reason=reason,
                     mode=mode,
-                    operator=bool(verdict.get("operator_override") or plan.get("operator_instruction")),
+                    operator=bool(
+                        verdict.get("operator_override")
+                        or verdict.get("verified_by") in ("operator", "model+operator")
+                        or plan.get("operator_instruction")
+                    ),
                     plan=plan,
                     verify=verdict,
                 )
             )
-            history.append(RoundResult(index, decision, plan=plan).history_line())
+            line = RoundResult(index, decision, plan=plan).history_line()
+            next_issue = str(verdict.get("next_major_issue", "")).strip()
+            if next_issue and verdict.get("verified_by") in ("operator", "model+operator"):
+                line += f" (operator: {truncate(next_issue, 90)})"
+            history.append(line)
 
             if decision in ("keep", "done"):
                 current_html, current_png = candidate_html, candidate_png
@@ -434,6 +504,7 @@ class Pipeline:
             "operator_notes": self.notes,
             "operator_interventions": self.interventions,
             "operator_rounds": sum(1 for r in results if r.operator),
+            "verify_mode": self.verify_mode,
             "thinking_control": self.llm.supports_thinking_flag,
             "rounds": [
                 {

@@ -97,10 +97,11 @@ out/sample/
     r01/  plan.json  action_raw.txt  patch.json
           before.html  before.png
           candidate.html  candidate.png
-          metrics.json  verify.json
+          compare.png   metrics.json  verify.json
     r02/  ...
 ```
 
+`compare.png`는 원본·수정 전·수정 후를 나란히 붙인 이미지로, 사람이 판정할 때 쓴다.
 `patch.json`은 patch 모드 라운드에만 생긴다. APPLY나 RENDER에서 실패한 라운드는
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
 `summary.json`은 라운드별로 어느 모드였는지(`mode`)를 함께 기록한다.
@@ -122,21 +123,58 @@ python run.py build sample.png --notes-file notes.txt
 문제의 설명으로 받아들이지 말고, 이미지를 먼저 판단하라"는 지시가 붙어 있어서
 메모가 눈앞의 렌더 판단을 덮어쓰지 않는다.
 
-### 대화형 — 라운드마다 개입
+### VERIFY를 누가 하는가
+
+```bash
+python run.py build sample.png --verify model   # 기본. 모델만 판정
+python run.py build sample.png --verify both    # 모델이 판정하고 사람이 뒤집을 수 있다
+python run.py build sample.png --verify human   # 모델 호출 없이 사람이 판정
+```
+
+`--verify human` 은 VERIFY LLM 호출을 **아예 하지 않는다.** 라운드마다
+`rounds/rNN/compare.png` 를 보고 사람이 직접 판정한다.
+
+```
+--- VERIFY (사람 판정) ---
+비교 이미지: out/sample/rounds/r01/compare.png
+이번 라운드 목표: 표 컬럼 폭을 원본에 맞춘다
+판정 (keep=반영 / revert=되돌림 / done=완료): keep
+이유 (선택, Enter=생략): 제목 크기가 원본과 맞았다
+다음에 고칠 것 (선택, Enter=생략): 표 우측 정렬이 아직 다르다
+```
+
+`compare.png` 는 **원본 · 수정 전 · 수정 후**를 한 장에 나란히 붙인 이미지다.
+세 파일을 따로 열지 않아도 되고, 아래 여백은 세 패널에서 같은 양만큼 잘라내므로
+수직 위치를 그대로 비교할 수 있다. 라벨이 영문인 이유는 한글 글리프가 없는
+환경에서 라벨이 □로 깨지는 것보다 낫기 때문이다.
+
+"다음에 고칠 것"에 적은 내용은 **다음 라운드 PLAN의 history에 실려 들어간다.**
+사람의 판단이 다음 계획에 반영되는 경로다.
+
+`--verify human` 인데 터미널이 아니면 **에러로 종료한다.** 판정을 줄 다른
+경로가 없어서 다운그레이드가 불가능하다. `--verify both` 는 같은 상황에서
+`model` 로 내려간다.
+
+### 대화형 — PLAN에 지시 덧붙이기
 
 ```bash
 python run.py build sample.png --interactive
 ```
 
-PLAN 직후와 VERIFY 직후에 멈춘다.
+PLAN 직후에 멈춘다. `--verify` 를 따로 주지 않으면 `both` 가 된다.
 
-| 지점 | 입력 | 결과 |
-| --- | --- | --- |
-| PLAN | Enter | 계획 그대로 수락 |
-| PLAN | 아무 텍스트 | `plan.json`의 `operator_instruction`으로 들어가고, ACTION이 그대로 받는다 |
-| PLAN | `s` | 이 라운드를 건너뛴다 |
-| VERIFY | Enter | 모델 판정 수락 |
-| VERIFY | `keep` / `revert` / `done` | 판정을 강제한다 |
+| 입력 | 결과 |
+| --- | --- |
+| Enter | 계획 그대로 수락 |
+| 아무 텍스트 | `plan.json`의 `operator_instruction`으로 들어가고, ACTION이 그대로 받는다 |
+| `s` | 이 라운드를 건너뛴다 |
+| `keep`/`revert`/`done` | VERIFY 판정어라고 알려주고 다시 묻는다 |
+
+멈춤은 해당 단계가 **이미 실행된 뒤**다. PLAN에 넣은 텍스트는 PLAN을 다시
+돌리지 않고 ACTION으로 간다. 계획을 다시 짜게 하는 게 아니라 덧붙이는 것이다.
+
+한 라운드에서 멈추는 횟수는 상황에 따라 다르다. APPLY에서 거부되거나 렌더가
+실패하면 VERIFY까지 가지 않으므로 그 라운드는 PLAN에서만 멈춘다.
 
 stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 남기고 자동으로
 꺼진다. 입력을 기다리다 빌드가 멈추는 일은 없다.
@@ -146,12 +184,16 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 이게 중요하다. 사람이 구해준 것과 모델이 스스로 한 것을 구분하지 못하면
 "Qwen이 이 작업을 할 수 있나"라는 판단이 오염된다.
 
+* `verify.json`의 `verified_by`가 누가 판정했는지 말해준다: `model` /
+  `operator` / `model+operator`.
 * VERIFY 판정을 뒤집으면 모델의 원래 판정이 `verify.json`의 `model_decision`에
   그대로 남는다. `operator_override`에 사람이 고른 값이 들어간다.
 * `summary.json`에 `operator_notes`(어떤 메모로 돌렸는지),
   `operator_interventions`(라운드별 개입 횟수), `operator_rounds`(개입이 있었던
   라운드 수), `skipped`(건너뛴 라운드 수)가 남는다.
-* 라운드별로도 `operator: true/false`가 붙는다.
+* 라운드별로도 `operator: true/false`가 붙는다. 사람이 판정한 라운드, 사람이
+  판정을 뒤집은 라운드, 사람이 PLAN에 지시를 넣은 라운드가 모두 여기 포함된다.
+* `summary.json`의 `verify_mode`로 그 실행이 어떤 방식이었는지 남는다.
 
 모델 단독 성능을 보려면 메모 없이 `--interactive` 없이 돌린 실행을 봐야 한다.
 개입이 섞인 실행에서는 `operator: true`인 라운드를 제외하고 읽는다.

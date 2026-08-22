@@ -171,15 +171,31 @@ def cmd_build(args, cfg) -> int:
         return 1
 
     interactive = args.interactive
-    if interactive and not sys.stdin.isatty():
+    # Pipeline resolves None the same way; resolved here too for the guard below.
+    verify_mode = args.verify or ("both" if interactive else "model")
+    tty = sys.stdin.isatty()
+
+    if verify_mode == "human" and not tty:
+        # There is no other source of a verdict, so this cannot be downgraded.
+        print("오류: --verify human 은 사람 입력이 필요한데 터미널이 아닙니다",
+              file=sys.stderr)
+        return 1
+    if interactive and not tty:
         # A blocked input() in a batch run would hang the whole build.
         print("경고: 대화형 입력을 받을 수 없는 환경이라 --interactive 를 끕니다",
               file=sys.stderr)
         interactive = False
+        if verify_mode == "both":
+            verify_mode = "model"
     if notes:
         print(f"운영자 메모 {len(notes)}자를 PLAN/VERIFY 프롬프트에 넣습니다")
     if interactive:
-        print("대화형 모드: 매 라운드 PLAN과 VERIFY에서 개입할 수 있습니다")
+        print("대화형 모드: 매 라운드 PLAN에서 지시를 덧붙일 수 있습니다")
+    if verify_mode == "human":
+        print("VERIFY: 모델을 호출하지 않고 사람이 판정합니다 "
+              "(각 라운드 rounds/rNN/compare.png 를 보고 입력)")
+    elif verify_mode == "both":
+        print("VERIFY: 모델이 판정하고 사람이 뒤집을 수 있습니다")
 
     # The renderer is a hard dependency of the loop: do not start without it.
     renderer = RendererClient(
@@ -194,7 +210,13 @@ def cmd_build(args, cfg) -> int:
         return 1
 
     try:
-        summary = Pipeline(cfg, out_dir, notes=notes, interactive=interactive).build(source)
+        summary = Pipeline(
+            cfg,
+            out_dir,
+            notes=notes,
+            interactive=interactive,
+            verify_mode=verify_mode,
+        ).build(source)
     except (RendererError, LLMError, RuntimeError, FileNotFoundError) as exc:
         LOG.error("build failed: %s", exc)
         print(f"빌드 실패: {exc}", file=sys.stderr)
@@ -257,7 +279,16 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--interactive",
         action="store_true",
-        help="매 라운드 PLAN에 지시를 덧붙이고 VERIFY 판정을 뒤집을 수 있다",
+        help="매 라운드 PLAN에 지시를 덧붙인다 (VERIFY는 --verify both 가 된다)",
+    )
+    build.add_argument(
+        "--verify",
+        choices=("model", "human", "both"),
+        help=(
+            "VERIFY를 누가 하는가. model=모델만(기본), "
+            "human=모델 호출 없이 사람이 compare.png 보고 판정, "
+            "both=모델이 판정하고 사람이 뒤집을 수 있음"
+        ),
     )
     build.set_defaults(func=cmd_build)
 

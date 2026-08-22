@@ -499,6 +499,74 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
 
 
 
+
+
+# ------------------------------------------------------ 10. human as verifier
+
+def test_human_verify(llm_base: str, renderer_url: str) -> None:
+    print("[10] --verify human")
+    import shutil
+
+    from pipeline import Pipeline
+
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+
+    mock_services.LLMHandler.plan_calls = 0
+    out = ROOT / "out" / "human_verify"
+    if out.exists():
+        shutil.rmtree(out)
+
+    pipe = Pipeline(cfg, out, verify_mode="human")
+    # Count the stages the model is actually asked for.
+    stages: list[str] = []
+    original = pipe.llm.chat
+    pipe.llm.chat = lambda messages, **kw: (stages.append(kw.get("stage", "?")), original(messages, **kw))[1]
+    answers = iter(["keep", "제목 크기가 맞았다", "표 우측 정렬이 남았다"])
+    pipe._input = staticmethod(lambda _p: next(answers, ""))
+
+    summary = pipe.build(make_source_png(Path("tmp/source_fixture.png")))
+
+    assert not any(st.startswith("verify") for st in stages), stages
+    assert "plan" in stages and any(st.startswith("action") for st in stages), stages
+    ok(f"no VERIFY call to the model; stages used were {stages}")
+
+    verdict = json.loads((out / "rounds" / "r01" / "verify.json").read_text())
+    assert verdict["decision"] == "keep", verdict
+    assert verdict["verified_by"] == "operator", verdict
+    assert verdict["reason"] == "제목 크기가 맞았다", verdict
+    assert verdict["next_major_issue"] == "표 우측 정렬이 남았다", verdict
+    ok("operator verdict recorded with verified_by=operator")
+
+    assert (out / "rounds" / "r01" / "compare.png").exists()
+    w, h = utils.image_size(out / "rounds" / "r01" / "compare.png")
+    assert w > 2000, (w, h)  # three panels side by side
+    ok(f"compare.png written for the operator to judge from ({w}x{h})")
+
+    assert summary["verify_mode"] == "human"
+    assert summary["rounds"][0]["operator"] is True
+    assert summary["operator_interventions"] == 1
+    ok("summary records verify_mode=human and flags the round as operator-touched")
+
+    # An unusable verdict must never adopt the edit.
+    pipe2 = Pipeline(cfg, out, verify_mode="human")
+    pipe2._input = staticmethod(lambda _p: "")
+    v = pipe2.human_verify({"goal": "g"}, out / "rounds" / "r01" / "compare.png")
+    assert v["decision"] == "revert", v
+    ok("no usable operator input defaults to revert, never keep")
+
+    # The operator's next issue reaches the following PLAN through history.
+    import prompts as pr
+    block = pr.history_block(["Round 1: g -> keep (operator: 표 우측 정렬이 남았다)"])
+    assert "표 우측 정렬이 남았다" in block
+    ok("operator's next-issue note is carried into the next PLAN's history")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -513,6 +581,7 @@ def main() -> int:
     test_patch_mode()
     test_patch_artifacts()
     test_operator(llm_base, renderer_url)
+    test_human_verify(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

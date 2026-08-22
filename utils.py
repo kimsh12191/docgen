@@ -97,6 +97,82 @@ def png_bytes(source: str | os.PathLike | bytes, max_side: int = 1600) -> bytes:
     return buf.getvalue()
 
 
+def _label_font(size: int = 16):
+    from PIL import ImageFont
+
+    for candidate in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        if os.path.exists(candidate):
+            try:
+                return ImageFont.truetype(candidate, size)
+            except OSError:
+                pass
+    return ImageFont.load_default()
+
+
+def _content_bottom(img, threshold: int = 250) -> int:
+    """Last row that has any non-white pixel."""
+    grey = img.convert("L")
+    width, height = grey.size
+    px = grey.load()
+    for y in range(height - 1, -1, -1):
+        for x in range(0, width, 4):  # every 4th column is plenty for whitespace
+            if px[x, y] < threshold:
+                return y + 1
+    return height
+
+
+def side_by_side(panels: list[tuple[str, bytes | str]], path: str | os.PathLike) -> Path:
+    """Compose labelled images into one PNG so a person can compare them at a glance.
+
+    Labels must be ASCII: the environment may have no font with wider coverage,
+    and a label rendered as boxes is worse than an English one.
+
+    Trailing whitespace is cropped by the same amount on every panel, so the
+    panels stay vertically comparable.
+    """
+    from PIL import Image, ImageDraw
+
+    loaded = []
+    for label, src in panels:
+        if isinstance(src, (bytes, bytearray)):
+            img = Image.open(io.BytesIO(bytes(src)))
+        else:
+            img = Image.open(str(src))
+        loaded.append((label, img.convert("RGB")))
+
+    keep = min(
+        max(_content_bottom(img) for _, img in loaded) + 24,
+        max(img.height for _, img in loaded),
+    )
+    loaded = [(label, img.crop((0, 0, img.width, min(keep, img.height)))) for label, img in loaded]
+
+    font = _label_font()
+    bar = 26
+    gap = 14
+    height = max(img.height for _, img in loaded) + bar
+    width = sum(img.width for _, img in loaded) + gap * (len(loaded) - 1)
+
+    sheet = Image.new("RGB", (width, height), (238, 238, 238))
+    draw = ImageDraw.Draw(sheet)
+    x = 0
+    for label, img in loaded:
+        draw.text((x + 6, 5), label, fill=(0, 0, 0), font=font)
+        sheet.paste(img, (x, bar))
+        draw.rectangle([x, bar, x + img.width - 1, bar + img.height - 1], outline=(150, 150, 150))
+        x += img.width + gap
+
+    return write_bytes(path, _to_png(sheet))
+
+
+def _to_png(img) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def data_uri(data: bytes, mime: str = "image/png") -> str:
     return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
