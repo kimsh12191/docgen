@@ -70,6 +70,19 @@ python run.py build sample.png --max-rounds 4 -v
 `doctor`는 하나라도 실패하면 non-zero로 종료한다. `build`는 renderer health
 검사가 실패하면 시작하지 않는다 — renderer는 이 loop의 필수 구성요소다.
 
+### 처음 실행할 때
+
+이 순서대로 한다. 앞 단계가 실패하면 다음으로 넘어가지 말 것.
+
+1. `python run.py doctor` — 두 서비스에 닿는지 확인한다. 실패하면 방화벽·VPN
+   문제이지 코드 문제가 아니다.
+2. `python run.py doctor --llm-image` — 이미지를 실제로 보내 멀티모달 호출이
+   되는지 확인한다.
+3. `python run.py build sample.png -o out/sample --max-rounds 2 -v` — 짧게
+   먼저 돌려서 프롬프트가 먹히는지 본다. 여기서 `plan.json`과 `verify.json`이
+   말이 되는 내용이면 라운드를 늘린다.
+4. `python run.py build sample.png -o out/sample` — 기본 8라운드.
+
 ## 산출물
 
 ```
@@ -91,6 +104,63 @@ out/sample/
 `patch.json`은 patch 모드 라운드에만 생긴다. APPLY나 RENDER에서 실패한 라운드는
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
 `summary.json`은 라운드별로 어느 모드였는지(`mode`)를 함께 기록한다.
+
+## 결과 읽는 법
+
+먼저 `clone.png`와 입력 PNG를 나란히 놓고 눈으로 본다. 그게 이 도구의 목표다.
+그 다음 `summary.json`으로 loop가 어떻게 굴러갔는지 확인한다.
+
+```json
+{
+  "stop_reason": "done",
+  "rounds_run": 5, "kept": 3, "reverted": 1, "rejected": 1, "errors": 0,
+  "thinking_control": true,
+  "rounds": [
+    {"round": 1, "decision": "keep", "mode": "patch",
+     "scope": "local", "target": "...", "goal": "...", "reason": "...", "error": ""}
+  ]
+}
+```
+
+| 필드 | 의미 |
+| --- | --- |
+| `stop_reason` | `done` = VERIFY가 충분히 닮았다고 판단하고 종료. `max_rounds` = 라운드를 다 쓰고 끝. |
+| `kept` | VERIFY가 개선으로 인정해 채택한 라운드 수 |
+| `reverted` | 렌더는 됐지만 더 나빠져서 되돌린 라운드 수 |
+| `rejected` | HTML이 깨졌거나 patch가 적용되지 않았거나, 수정이 아무 변화도 만들지 못해 렌더까지 가지 못한 라운드 수 |
+| `errors` | LLM 호출 자체가 실패한 라운드 수 |
+| `mode` | 그 라운드가 `patch`였는지 `rewrite`였는지 |
+| `thinking_control` | `false`면 서버가 `chat_template_kwargs`를 거부해 stage별 thinking 제어 없이 돌았다는 뜻 |
+
+건강한 실행은 `kept`가 대부분이고 `stop_reason`이 `done`이다.
+`reverted`가 섞이는 것은 정상이다 — VERIFY가 제 역할을 했다는 신호다.
+
+라운드별로 더 파고들려면 `rounds/rNN/` 안을 본다. `plan.json`(무엇을 고치려
+했는지) → `patch.json` 또는 `action_raw.txt`(실제로 뭘 했는지) →
+`before.png` / `candidate.png`(그래서 어떻게 변했는지) → `verify.json`(왜
+채택·기각했는지) 순서로 읽으면 한 라운드의 판단 과정이 그대로 재구성된다.
+
+## 문제가 생기면
+
+| 증상 | 원인과 대응 |
+| --- | --- |
+| `doctor`의 `[LLM]` 또는 `[Renderer]`가 FAIL | 서비스에 못 닿는다. 사내망·VPN·방화벽을 먼저 확인한다. 코드를 고칠 일이 아니다. |
+| `rejected`가 대부분이고 `mode`가 `rewrite` | 문서가 커서 ACTION이 `max_tokens`에 걸린다. 로그의 `finish_reason == 'length'` 경고로 확인된다. PLAN이 `global`만 내고 있다는 뜻이므로 PLAN 프롬프트를 국소 수정 쪽으로 유도해야 한다. |
+| `rejected`가 대부분이고 `mode`가 `patch` | `find` 문자열이 문서에 없거나 여러 곳에 매칭된다. `error.json`에 어느 문자열이 문제였는지 그대로 찍힌다. patch 프롬프트에서 "유일하게 매칭되는 짧은 문자열" 지시를 강화할 지점이다. |
+| `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. |
+| `thinking_control`이 `false` | 서버가 해당 파라미터를 안 받는다. 동작은 하지만 PLAN·VERIFY가 thinking 없이 판단하므로 품질이 떨어질 수 있다. |
+| `errors`가 있다 | LLM 호출 실패다. `run.log`에 재시도 내역과 HTTP 응답이 남는다. |
+
+## 현재 검증 상태
+
+정직하게 적어 둔다.
+
+* **검증됨** — loop 로직(keep / revert / reject / done, 산출물 구조, patch
+  가드), renderer `/probe` 계약과 `probe_js`의 실제 브라우저 동작, ACTION의
+  잘림 처리. `python3 tests/test_offline.py`로 재현 가능하다.
+* **미검증** — 사내 Qwen이 이 프롬프트에 어떻게 반응하는지. 프롬프트 품질과
+  수렴 속도는 실제 문서로 돌려봐야 안다. 위 "처음 실행할 때"의 3번을 짧게
+  돌려서 `plan.json`·`verify.json`을 먼저 읽어보는 것을 권한다.
 
 ## 설정
 
