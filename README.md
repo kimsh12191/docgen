@@ -163,20 +163,66 @@ python run.py build sample.png --verify human   # 모델 호출 없이 사람이
 경로가 없어서 다운그레이드가 불가능하다. `--verify both` 는 같은 상황에서
 `model` 로 내려간다.
 
-### 대화형 — PLAN에 지시 덧붙이기
+### 대화형 — 뒤집기와 첨부
 
 ```bash
 python run.py build sample.png --interactive
 ```
 
-PLAN 직후에 멈춘다. `--verify` 를 따로 주지 않으면 `both` 가 된다.
+PLAN 직후와(`--verify both` 면) VERIFY 직후에 멈춘다. `--verify` 를 따로 주지
+않으면 `both` 가 된다.
+
+개입 방식은 **어느 단계에서든 두 가지**다.
+
+* **뒤집기** — 모델 판단을 사람 것으로 갈아치운다
+* **첨부** — 모델 판단을 그대로 두고 사람 의견을 붙인다
+
+**PLAN**
 
 | 입력 | 결과 |
 | --- | --- |
 | Enter | 계획 그대로 수락 |
-| 아무 텍스트 | `plan.json`의 `operator_instruction`으로 들어가고, ACTION이 그대로 받는다 |
+| `a <의견>` | 첨부. `operator_note`로 들어가고 모델 계획은 그대로 남는다 |
+| `o <지시>` | 뒤집기. `operator_instruction`으로 들어가고 ACTION은 이것을 계획의 목표보다 우선한다 |
 | `s` | 이 라운드를 건너뛴다 |
 | `keep`/`revert`/`done` | VERIFY 판정어라고 알려주고 다시 묻는다 |
+
+**VERIFY** (`--verify both`)
+
+| 입력 | 결과 |
+| --- | --- |
+| Enter | 모델 판정 수락 |
+| `a <의견>` | 첨부. 판정은 그대로 두고 `operator_note`만 붙는다 |
+| `keep`/`revert`/`done` | 뒤집기. 모델 판정은 `model_decision`에 보존된다 |
+| `revert <이유>` | 뒤집으면서 같은 줄에 이유를 붙인다 |
+
+첨부한 의견은 **다음 라운드 PLAN의 history로 실려 간다.** 판정을 바꾸지 않고
+방향만 잡아주고 싶을 때 쓰는 경로다.
+
+`a` 나 `o` 뒤에 내용을 안 적으면 빈 값으로 저장하지 않고 다시 묻는다. 세 번
+알아듣지 못하면 모델 판단을 그대로 두고 넘어간다.
+
+### 모델은 사람 개입이 온다는 걸 미리 안다
+
+사람이 개입할 수 있는 실행에서는 PLAN·ACTION·VERIFY 프롬프트에 아래 계약이
+함께 들어간다. 그래야 ACTION이 `operator_instruction` 을 "설명 없는 낯선 필드"가
+아니라 우선해야 할 지시로 다룬다.
+
+```
+A human operator is taking part in this loop, so some of the input you get is
+written by a person, not by you:
+- "operator_instruction" in the plan: a human instruction that REPLACES the
+  plan's own goal. Do what it says instead.
+- "operator_note" in the plan: a human comment to take into account WITHOUT
+  discarding the plan.
+- a history line marked (operator: ...): a human comment on an earlier round.
+The operator is looking at the same images you are. Prefer their input over your
+own earlier reasoning, but never over what the current images plainly show. If
+their input contradicts the images, say so rather than following it blindly.
+```
+
+모델 단독 실행(`--verify model`, `--interactive` 없음)에서는 이 블록이 **들어가지
+않는다.** 오지 않을 입력을 설명해서 프롬프트를 흐리지 않는다.
 
 멈춤은 해당 단계가 **이미 실행된 뒤**다. PLAN에 넣은 텍스트는 PLAN을 다시
 돌리지 않고 ACTION으로 간다. 계획을 다시 짜게 하는 게 아니라 덧붙이는 것이다.
@@ -192,8 +238,10 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 이게 중요하다. 사람이 구해준 것과 모델이 스스로 한 것을 구분하지 못하면
 "Qwen이 이 작업을 할 수 있나"라는 판단이 오염된다.
 
-* `verify.json`의 `verified_by`가 누가 판정했는지 말해준다: `model` /
-  `operator` / `model+operator`.
+* `plan.json`의 `planned_by`: `model` / `model+operator`.
+* `verify.json`의 `verified_by`: `model` / `operator` / `model+operator`.
+* 뒤집기와 첨부는 남는 필드로 구분된다. 뒤집기는 `operator_instruction`(PLAN)
+  또는 `operator_override`(VERIFY), 첨부는 양쪽 다 `operator_note`.
 * VERIFY 판정을 뒤집으면 모델의 원래 판정이 `verify.json`의 `model_decision`에
   그대로 남는다. `operator_override`에 사람이 고른 값이 들어간다.
 * `summary.json`에 `operator_notes`(어떤 메모로 돌렸는지),

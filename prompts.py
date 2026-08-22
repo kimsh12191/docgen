@@ -131,6 +131,21 @@ Return JSON only:
 }}"""
 
 
+# Declared to the model whenever a human is taking part, so operator fields
+# never arrive unexplained. Without this, ACTION receives an
+# "operator_instruction" it was never told the meaning or precedence of.
+OPERATOR_CONTRACT = """A human operator is taking part in this loop, so some of the input you get is written by a person, not by you:
+- "operator_instruction" in the plan: a human instruction that REPLACES the plan's own goal. Do what it says instead.
+- "operator_note" in the plan: a human comment to take into account WITHOUT discarding the plan.
+- a history line marked (operator: ...): a human comment on an earlier round.
+The operator is looking at the same images you are. Prefer their input over your own earlier reasoning, but never over what the current images plainly show. If their input contradicts the images, say so rather than following it blindly."""
+
+
+def operator_contract_block(active: bool) -> str:
+    """Empty unless a human can actually intervene in this run."""
+    return OPERATOR_CONTRACT if active else ""
+
+
 OPERATOR_NOTES_RULE = (
     "Do not treat these notes as a description of what is currently wrong.\n"
     "Judge the images first; the notes only tell you what matters in this document."
@@ -152,3 +167,7 @@ def history_block(entries: list[str], limit: int = 3) -> str:
         return ""
     lines = "\n".join(f"- {e}" for e in recent)
     return f"Previous attempts:\n{lines}\n\n{HISTORY_RULE}"
+
+
+PLANNED_BY = ("model", "model+operator")
+VERIFIED_BY = ("model", "operator", "model+operator")

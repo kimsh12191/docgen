@@ -424,16 +424,30 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     assert prompts.notes_block(plain.notes) == ""
     ok("blank notes add nothing to the prompts")
 
-    # --- interactive: instruction reaches ACTION via the plan JSON
+    # --- interactive PLAN: replace the goal vs attach a note
     pipe.interactive = True
-    pipe._ask = lambda _p: "제목 크기부터 맞춰라"
+    pipe.operator_active = True
+    pipe._ask = lambda _p: "o 제목 크기부터 맞춰라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert plan["operator_instruction"] == "제목 크기부터 맞춰라", plan
-    assert pipe.interventions == 1
-    ok("operator instruction lands in plan.json, which ACTION receives verbatim")
+    assert "operator_note" not in plan, plan
+    assert plan["planned_by"] == "model+operator", plan
+    ok("PLAN 'o' replaces the goal via operator_instruction")
+
+    pipe._ask = lambda _p: "a 표 정렬도 같이 보라"
+    plan = pipe.review_plan({"scope": "local", "goal": "g"})
+    assert plan["operator_note"] == "표 정렬도 같이 보라", plan
+    assert "operator_instruction" not in plan, plan
+    assert plan["goal"] == "g", "attaching a note must not discard the model's plan"
+    ok("PLAN 'a' attaches a note and leaves the model's plan intact")
+
+    pipe._ask = lambda _p: "a"
+    plan = pipe.review_plan({"scope": "local", "goal": "g"})
+    assert "operator_note" not in plan and plan["planned_by"] == "model"
+    ok("a bare 'a' with no text is refused rather than stored empty")
 
     # --- a VERIFY decision word typed at the PLAN prompt is caught, not injected
-    replies = iter(["revert", "제목부터"])
+    replies = iter(["revert", "o 제목부터"])
     pipe._ask = lambda _p: next(replies)
     plan = pipe.review_plan({"scope": "local"})
     assert plan["operator_instruction"] == "제목부터", plan
@@ -447,6 +461,22 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
         ok("operator can skip a round")
     else:
         raise AssertionError("skip was not honoured")
+
+    # --- interactive VERIFY: attach an opinion without changing the decision
+    pipe._ask = lambda _p: "a 표 우측 정렬이 아직 다르다"
+    v = pipe.review_verify({"decision": "keep", "verified_by": "model"})
+    assert v["decision"] == "keep", "attaching an opinion must not change the verdict"
+    assert v["operator_note"] == "표 우측 정렬이 아직 다르다", v
+    assert v["verified_by"] == "model+operator", v
+    assert "operator_override" not in v, v
+    ok("VERIFY 'a' attaches an opinion and leaves the model's decision standing")
+
+    # --- interactive VERIFY: override, with an optional reason on the same line
+    pipe._ask = lambda _p: "revert 표가 더 어긋났다"
+    v = pipe.review_verify({"decision": "keep", "verified_by": "model"})
+    assert v["decision"] == "revert" and v["model_decision"] == "keep", v
+    assert v["operator_note"] == "표가 더 어긋났다", v
+    ok("VERIFY override accepts a reason on the same line")
 
     # --- interactive: overriding VERIFY, keeping the model's own verdict
     pipe._ask = lambda _p: "revert"
@@ -474,9 +504,39 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     def boom(_p):
         raise AssertionError("must not prompt when interactive is off")
     quiet._ask = boom
-    assert quiet.review_plan({"scope": "local"}) == {"scope": "local"}
+    plan_out = quiet.review_plan({"scope": "local"})
+    # planned_by is always recorded so plan.json is self-describing.
+    assert plan_out == {"scope": "local", "planned_by": "model"}, plan_out
     assert quiet.review_verify({"decision": "keep"})["decision"] == "keep"
-    ok("non-interactive runs never block on input")
+    ok("non-interactive runs never block on input, and record planned_by=model")
+
+    # --- the operator contract is declared to the model only when it applies
+    assert prompts.operator_contract_block(False) == ""
+    contract = prompts.operator_contract_block(True)
+    for field in ("operator_instruction", "operator_note", "(operator: "):
+        assert field in contract, field
+    assert "REPLACES" in contract and "WITHOUT discarding" in contract
+    ok("operator contract names both fields and their precedence")
+
+    auto = Pipeline(cfg, ROOT / "out" / "op_probe")
+    assert auto.operator_active is False
+    assert Pipeline(cfg, ROOT / "out" / "op_probe", interactive=True).operator_active
+    assert Pipeline(cfg, ROOT / "out" / "op_probe", verify_mode="human").operator_active
+    ok("contract is off for a model-only run, on when a human can intervene")
+
+    seen2: list[str] = []
+    pipe3 = Pipeline(cfg, ROOT / "out" / "op_probe", interactive=True)
+    orig3 = pipe3.llm.chat
+    pipe3.llm.chat = lambda m, **kw: (seen2.extend(
+        pt["text"] for pt in m[-1]["content"] if pt.get("type") == "text"), orig3(m, **kw))[1]
+    png2, _ = pipe3.render(mock_services.GOOD_HTML.format(title=28, table_width="60%", rev=0))
+    pipe3.plan(src, png2, [])
+    pipe3.action({"scope": "local"}, "<html><body>x</body></html>", src, png2)
+    pipe3.verify({"goal": "g"}, src, png2, png2)
+    assert len(seen2) == 3, f"expected PLAN, ACTION and VERIFY prompts, got {len(seen2)}"
+    missing = [i for i, t in enumerate(seen2) if "operator_instruction" not in t]
+    assert not missing, f"stage prompt(s) {missing} lack the operator contract"
+    ok("PLAN, ACTION and VERIFY prompts all carry the operator contract")
 
     # --- a full build records the intervention counts
     mock_services.LLMHandler.plan_calls = 0
@@ -559,11 +619,10 @@ def test_human_verify(llm_base: str, renderer_url: str) -> None:
     assert v["decision"] == "revert", v
     ok("no usable operator input defaults to revert, never keep")
 
-    # The operator's next issue reaches the following PLAN through history.
-    import prompts as pr
-    block = pr.history_block(["Round 1: g -> keep (operator: 표 우측 정렬이 남았다)"])
+    # The operator's comment reaches the following PLAN through history.
+    block = prompts.history_block(["Round 1: g -> keep (operator: 표 우측 정렬이 남았다)"])
     assert "표 우측 정렬이 남았다" in block
-    ok("operator's next-issue note is carried into the next PLAN's history")
+    ok("operator's comment is carried into the next PLAN's history")
 
 
 

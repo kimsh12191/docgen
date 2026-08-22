@@ -76,6 +76,9 @@ class Pipeline:
         self.notes = (notes or "").strip()
         self.interactive = interactive
         self.verify_mode = verify_mode
+        # Whether a person can actually intervene in this run. Gates the
+        # contract block so the default path's prompts stay unchanged.
+        self.operator_active = interactive or verify_mode != "model"
         self.interventions = 0
         self.llm = QwenClient(cfg.llm)
         self.renderer = RendererClient(
@@ -135,6 +138,9 @@ class Pipeline:
     def plan(self, source_png: Path, current_png: bytes, history: list[str]) -> dict:
         """PLAN. Thinking ON. Images are the primary evidence."""
         text = prompts.PLAN_USER
+        contract = prompts.operator_contract_block(self.operator_active)
+        if contract:
+            text = f"{text}\n\n{contract}"
         notes = prompts.notes_block(self.notes)
         if notes:
             text = f"{text}\n\n{notes}"
@@ -186,6 +192,9 @@ class Pipeline:
             plan=json.dumps(plan, ensure_ascii=False, indent=2),
             html=current_html,
         )
+        contract = prompts.operator_contract_block(self.operator_active)
+        if contract:
+            text = f"{text}\n\n{contract}"
         messages = [
             system_message(prompts.ACTION_SYSTEM),
             user_message(
@@ -225,6 +234,9 @@ class Pipeline:
     def verify(self, plan: dict, source_png: Path, before_png: bytes, candidate_png: bytes) -> dict:
         """VERIFY. Thinking ON. Three images: source, before, after."""
         text = prompts.VERIFY_USER.format(plan=json.dumps(plan, ensure_ascii=False, indent=2))
+        contract = prompts.operator_contract_block(self.operator_active)
+        if contract:
+            text = f"{text}\n\n{contract}"
         notes = prompts.notes_block(self.notes)
         if notes:
             text = f"{text}\n\n{notes}"
@@ -267,41 +279,96 @@ class Pipeline:
         except (EOFError, KeyboardInterrupt):
             return ""
 
+    PLAN_PROMPT = (
+        "개입 (Enter=수락 / a <의견>=의견 첨부 / o <지시>=계획 교체 / s=건너뛰기): "
+    )
+
     def review_plan(self, plan: dict) -> dict:
-        """Let the operator steer the plan before ACTION turns it into an edit."""
+        """Let the operator amend or replace the plan before ACTION acts on it."""
+        plan.setdefault("planned_by", "model")
         if not self.interactive:
             return plan
         print("\n--- PLAN ---")
         print(json.dumps(plan, ensure_ascii=False, indent=2))
-        answer = self._ask("추가 지시 (Enter=수락, s=이 라운드 건너뛰기): ")
-        if answer.lower() in ("keep", "revert", "done"):
-            # The two prompts look alike; a VERIFY answer typed here would be
-            # injected into the plan as a nonsense instruction.
-            print(f"'{answer}' 는 VERIFY 판정어입니다. 여기는 PLAN 단계입니다.")
-            answer = self._ask("추가 지시 (Enter=수락, s=이 라운드 건너뛰기): ")
-        if answer.lower() == "s":
-            raise SkipRound("operator skipped the round")
-        if answer:
-            # Lands in the plan JSON, which ACTION receives verbatim.
-            plan["operator_instruction"] = answer
-            self.interventions += 1
-            LOG.info("PLAN: operator added an instruction")
+
+        for attempt in range(3):
+            answer = self._ask(self.PLAN_PROMPT)
+            if not answer:
+                return plan
+            head, _, rest = answer.partition(" ")
+            head = head.lower()
+            rest = rest.strip()
+
+            if head == "s":
+                raise SkipRound("operator skipped the round")
+            if head in ("keep", "revert", "done"):
+                # The two prompts look alike; a VERIFY answer typed here used to
+                # be injected into the plan as a nonsense instruction.
+                print(f"'{answer}' 는 VERIFY 판정어입니다. 여기는 PLAN 단계입니다.")
+                continue
+            if head in ("a", "o"):
+                if not rest:
+                    print(f"'{head}' 뒤에 내용을 함께 적어주세요.")
+                    continue
+                if head == "o":
+                    # ACTION is told this replaces the plan's own goal.
+                    plan["operator_instruction"] = rest
+                    LOG.info("PLAN: operator replaced the goal")
+                else:
+                    plan["operator_note"] = rest
+                    LOG.info("PLAN: operator attached a note")
+                plan["planned_by"] = "model+operator"
+                self.interventions += 1
+                return plan
+            print("a(의견 첨부) / o(계획 교체) / s(건너뛰기) 중에서 골라주세요.")
+            if attempt == 2:
+                print("입력을 이해하지 못했습니다. 계획을 그대로 수락합니다.")
         return plan
 
+    VERIFY_PROMPT = (
+        "개입 (Enter=수락 / a <의견>=의견 첨부 / keep|revert|done=판정 교체): "
+    )
+
     def review_verify(self, verdict: dict) -> dict:
-        """Let the operator overrule the model's own judgement of its edit."""
+        """Let the operator attach an opinion to, or overrule, the model's verdict."""
         if not self.interactive:
             return verdict
         print("\n--- VERIFY ---")
         print(json.dumps(verdict, ensure_ascii=False, indent=2))
-        answer = self._ask("판정 (Enter=수락, keep/revert/done=강제): ").lower()
-        if answer in ("keep", "revert", "done") and answer != verdict.get("decision"):
-            # Keep the model's own verdict so evaluation is not contaminated.
-            verdict["model_decision"] = verdict.get("decision")
-            verdict["operator_override"] = answer
-            verdict["decision"] = answer
-            self.interventions += 1
-            LOG.info("VERIFY: operator overrode %s -> %s", verdict["model_decision"], answer)
+
+        for attempt in range(3):
+            answer = self._ask(self.VERIFY_PROMPT)
+            if not answer:
+                return verdict
+            head, _, rest = answer.partition(" ")
+            head = head.lower()
+            rest = rest.strip()
+
+            if head == "a":
+                if not rest:
+                    print("'a' 뒤에 의견을 함께 적어주세요.")
+                    continue
+                # The decision stands; the comment travels to the next PLAN.
+                verdict["operator_note"] = rest
+                verdict["verified_by"] = "model+operator"
+                self.interventions += 1
+                LOG.info("VERIFY: operator attached a note, decision unchanged")
+                return verdict
+            if head in ("keep", "revert", "done"):
+                if head == verdict.get("decision"):
+                    return verdict  # agreeing is not an intervention
+                verdict["model_decision"] = verdict.get("decision")
+                verdict["operator_override"] = head
+                verdict["decision"] = head
+                verdict["verified_by"] = "model+operator"
+                if rest:
+                    verdict["operator_note"] = rest
+                self.interventions += 1
+                LOG.info("VERIFY: operator overrode %s -> %s", verdict["model_decision"], head)
+                return verdict
+            print("a(의견 첨부) / keep / revert / done 중에서 골라주세요.")
+            if attempt == 2:
+                print("입력을 이해하지 못했습니다. 모델 판정을 그대로 둡니다.")
         return verdict
 
     def human_verify(self, plan: dict, compare_path: Path) -> dict:
@@ -375,7 +442,7 @@ class Pipeline:
                 action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
-                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=bool(plan.get("operator_instruction"))))
+                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=(plan.get("planned_by") == "model+operator")))
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
@@ -397,7 +464,7 @@ class Pipeline:
                 candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=bool(plan.get("operator_instruction"))))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=(plan.get("planned_by") == "model+operator")))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (invalid HTML)")
                 write_json(rdir / "error.json", {"stage": "apply", "error": str(exc)})
                 continue
@@ -405,7 +472,7 @@ class Pipeline:
 
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
-                results.append(RoundResult(index, "noop", mode=mode, plan=plan, operator=bool(plan.get("operator_instruction"))))
+                results.append(RoundResult(index, "noop", mode=mode, plan=plan, operator=(plan.get("planned_by") == "model+operator")))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> no change produced")
                 continue
 
@@ -414,7 +481,7 @@ class Pipeline:
                 candidate_png, metrics = self.render(candidate_html)
             except RendererError as exc:
                 LOG.warning("round %d: candidate failed to render: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=bool(plan.get("operator_instruction"))))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=(plan.get("planned_by") == "model+operator")))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (render failed)")
                 write_json(rdir / "error.json", {"stage": "render", "error": str(exc)})
                 continue
@@ -440,11 +507,9 @@ class Pipeline:
                     verdict["verified_by"] = "model"
                     if self.verify_mode == "both":
                         verdict = self.review_verify(verdict)
-                        if verdict.get("operator_override"):
-                            verdict["verified_by"] = "model+operator"
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
-                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=bool(plan.get("operator_instruction"))))
+                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=(plan.get("planned_by") == "model+operator")))
                 write_json(rdir / "error.json", {"stage": "verify", "error": str(exc)})
                 continue
             write_json(rdir / "verify.json", verdict)
@@ -460,17 +525,20 @@ class Pipeline:
                     mode=mode,
                     operator=bool(
                         verdict.get("operator_override")
+                        or verdict.get("operator_note")
                         or verdict.get("verified_by") in ("operator", "model+operator")
-                        or plan.get("operator_instruction")
+                        or plan.get("planned_by") == "model+operator"
                     ),
                     plan=plan,
                     verify=verdict,
                 )
             )
             line = RoundResult(index, decision, plan=plan).history_line()
-            next_issue = str(verdict.get("next_major_issue", "")).strip()
-            if next_issue and verdict.get("verified_by") in ("operator", "model+operator"):
-                line += f" (operator: {truncate(next_issue, 90)})"
+            comment = str(verdict.get("operator_note", "")).strip()
+            if not comment and verdict.get("verified_by") == "operator":
+                comment = str(verdict.get("next_major_issue", "")).strip()
+            if comment:
+                line += f" (operator: {truncate(comment, 90)})"
             history.append(line)
 
             if decision in ("keep", "done"):
