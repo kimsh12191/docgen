@@ -11,10 +11,10 @@ SOURCE PNG -> INITIAL HTML -> RENDER
         +-----------------------+
         v
       PLAN   (VLM, thinking ON)   가장 중요한 불일치 하나를 고른다
-      ACTION (VLM, thinking OFF)  그 문제를 고치도록 HTML을 수정한다
-      APPLY  (Python)             fence 제거 + sanity check
+      ACTION (VLM, thinking OFF)  patch 또는 HTML 전문으로 수정한다
+      APPLY  (Python)             patch 적용 또는 fence 제거 + sanity check
       RENDER (외부 renderer)      HTML -> PNG
-      VERIFY (VLM, thinking ON)   keep / revert / done
+      VERIFY (VLM 또는 사람)      keep / revert / done
         |
         +-> keep   -> candidate 채택, 다음 PLAN
             revert -> 이전 HTML 복원, 다음 PLAN
@@ -25,7 +25,7 @@ CV 파이프라인, heuristic rule 모음, 구조물별 action 타입은 없다.
 실제 렌더를 비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로
 판정한다.
 
-### ACTION의 두 가지 모드
+## ACTION의 두 가지 모드
 
 PLAN이 이미 내놓는 `scope`가 그대로 모드 스위치다. 별도 taxonomy는 없다.
 
@@ -65,6 +65,11 @@ python run.py doctor --llm-image              # 멀티모달 호출까지 확인
 python run.py render test.html -o test.png    # HTML -> PNG 단발 렌더
 python run.py build sample.png -o out/sample  # 전체 loop 실행
 python run.py build sample.png --max-rounds 4 -v
+
+# 사람이 개입하는 방식 (아래 "사람이 개입하기" 참고)
+python run.py build sample.png --note "표 정렬이 가장 중요하다"
+python run.py build sample.png --verify human
+python run.py build sample.png --interactive
 ```
 
 `doctor`는 하나라도 실패하면 non-zero로 종료한다. `build`는 renderer health
@@ -79,8 +84,9 @@ python run.py build sample.png --max-rounds 4 -v
 2. `python run.py doctor --llm-image` — 이미지를 실제로 보내 멀티모달 호출이
    되는지 확인한다.
 3. `python run.py build sample.png -o out/sample --max-rounds 2 -v` — 짧게
-   먼저 돌려서 프롬프트가 먹히는지 본다. 여기서 `plan.json`과 `verify.json`이
-   말이 되는 내용이면 라운드를 늘린다.
+   먼저 돌려서 프롬프트가 먹히는지 본다. `rounds/r01/compare.png` 로 실제로
+   나아졌는지 눈으로 보고, `plan.json`·`verify.json` 이 말이 되는 내용이면
+   라운드를 늘린다.
 4. `python run.py build sample.png -o out/sample` — 기본 8라운드.
 
 ## 산출물
@@ -94,6 +100,7 @@ out/sample/
   run.log
   rounds/
     bootstrap.html  bootstrap.png
+    bootstrap_raw.txt  bootstrap_metrics.json
     r01/  plan.json  action_raw.txt  patch.json
           before.html  before.png
           candidate.html  candidate.png
@@ -104,7 +111,8 @@ out/sample/
 `compare.png`는 원본·수정 전·수정 후를 나란히 붙인 이미지로, 사람이 판정할 때 쓴다.
 `patch.json`은 patch 모드 라운드에만 생긴다. APPLY나 RENDER에서 실패한 라운드는
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
-`summary.json`은 라운드별로 어느 모드였는지(`mode`)를 함께 기록한다.
+`summary.json`은 라운드별로 ACTION 모드(`mode`)와 사람 개입 여부(`operator`)를
+함께 기록한다.
 
 ## 사람이 개입하기 (선택)
 
@@ -206,10 +214,12 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 ```json
 {
   "stop_reason": "done",
-  "rounds_run": 5, "kept": 3, "reverted": 1, "rejected": 1, "errors": 0,
+  "rounds_run": 5, "kept": 3, "reverted": 1, "rejected": 1, "errors": 0, "skipped": 0,
   "thinking_control": true,
+  "verify_mode": "model",
+  "operator_notes": "", "operator_interventions": 0, "operator_rounds": 0,
   "rounds": [
-    {"round": 1, "decision": "keep", "mode": "patch",
+    {"round": 1, "decision": "keep", "mode": "patch", "operator": false,
      "scope": "local", "target": "...", "goal": "...", "reason": "...", "error": ""}
   ]
 }
@@ -217,15 +227,18 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 
 | 필드 | 의미 |
 | --- | --- |
-| `stop_reason` | `done` = VERIFY가 충분히 닮았다고 판단하고 종료. `max_rounds` = 라운드를 다 쓰고 끝. |
+| `stop_reason` | `done` = VERIFY(모델 또는 사람)가 충분히 닮았다고 판단하고 종료. `max_rounds` = 라운드를 다 쓰고 끝. |
 | `kept` | VERIFY가 개선으로 인정해 채택한 라운드 수 |
 | `reverted` | 렌더는 됐지만 더 나빠져서 되돌린 라운드 수 |
 | `rejected` | HTML이 깨졌거나 patch가 적용되지 않았거나, 수정이 아무 변화도 만들지 못해 렌더까지 가지 못한 라운드 수 |
 | `errors` | LLM 호출 자체가 실패한 라운드 수 |
 | `mode` | 그 라운드가 `patch`였는지 `rewrite`였는지 |
 | `thinking_control` | `false`면 서버가 `chat_template_kwargs`를 거부해 stage별 thinking 제어 없이 돌았다는 뜻 |
-| `operator_interventions` | 사람이 PLAN에 지시를 넣거나 VERIFY 판정을 뒤집은 횟수. `0`이면 모델 단독 실행 |
+| `verify_mode` | 그 실행에서 VERIFY를 누가 했는가: `model` / `both` / `human` |
+| `operator_interventions` | 사람이 PLAN에 지시를 넣거나, VERIFY 판정을 뒤집거나, 직접 판정한 횟수. `0`이면 모델 단독 실행 |
+| `operator_rounds` | 사람 개입이 있었던 라운드 수 |
 | `skipped` | 사람이 건너뛴 라운드 수 |
+| `operator_notes` | 그 실행에 쓰인 운영자 메모 원문 |
 
 건강한 실행은 `kept`가 대부분이고 `stop_reason`이 `done`이다.
 `reverted`가 섞이는 것은 정상이다 — VERIFY가 제 역할을 했다는 신호다.
@@ -245,14 +258,19 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. |
 | `thinking_control`이 `false` | 서버가 해당 파라미터를 안 받는다. 동작은 하지만 PLAN·VERIFY가 thinking 없이 판단하므로 품질이 떨어질 수 있다. |
 | `errors`가 있다 | LLM 호출 실패다. `run.log`에 재시도 내역과 HTTP 응답이 남는다. |
+| `kept`만 쌓이는데 `compare.png`는 나아지지 않는다 | VERIFY가 자기 수정에 관대한 경우다. `--verify both`로 뒤집어 보거나 `--verify human`으로 사람이 판정한다. |
+| `done`이 너무 일찍 나온다 | VERIFY가 "거의 같다"를 느슨하게 본다. 위와 같은 대응. `final_verify.json`의 `reason`을 먼저 읽어 근거를 확인한다. |
+| PLAN이 매 라운드 같은 것만 집는다 | `--note`로 이 문서에서 중요한 것을 알려주거나, `--interactive`로 그 라운드에 직접 지시한다. |
 
 ## 현재 검증 상태
 
 정직하게 적어 둔다.
 
-* **검증됨** — loop 로직(keep / revert / reject / done, 산출물 구조, patch
-  가드), renderer `/probe` 계약과 `probe_js`의 실제 브라우저 동작, ACTION의
-  잘림 처리. `python3 tests/test_offline.py`로 재현 가능하다.
+* **검증됨** — loop 로직(keep / revert / reject / done, 산출물 구조),
+  patch 가드(없는·중복·no-op·잘못된 형식 edit 전부 거부), renderer `/probe`
+  계약과 `probe_js`의 실제 브라우저 동작, ACTION 출력 잘림 처리, 사람 개입
+  경로(메모 주입, PLAN 지시, VERIFY 오버라이드, `--verify human`)와 개입 기록.
+  `python3 tests/test_offline.py` 로 47개 검사가 재현된다.
 * **미검증** — 사내 Qwen이 이 프롬프트에 어떻게 반응하는지. 프롬프트 품질과
   수렴 속도는 실제 문서로 돌려봐야 안다. 위 "처음 실행할 때"의 3번을 짧게
   돌려서 `plan.json`·`verify.json`을 먼저 읽어보는 것을 권한다.
@@ -271,9 +289,9 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `config.py` | `config.toml` 로딩 |
 | `llm.py` | Qwen client (표준 `urllib`), message/image helper |
 | `renderer.py` | `/health` + `/probe` client와 probe script |
-| `prompts.py` | 4개 stage prompt |
-| `pipeline.py` | bootstrap과 PLAN/ACTION/APPLY/RENDER/VERIFY loop |
-| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출 |
+| `prompts.py` | stage prompt 5종(bootstrap / plan / action-patch / action-rewrite / verify)과 운영자 메모·history 블록 |
+| `pipeline.py` | bootstrap, PLAN/ACTION/APPLY/RENDER/VERIFY loop, 사람 개입 지점 |
+| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출, patch edit 적용, 비교 이미지 합성 |
 
 ## Renderer 계약
 
@@ -290,11 +308,19 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 
 ## Thinking 제어
 
-thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한다
-(BOOTSTRAP off, PLAN on, ACTION off, VERIFY on). 서버가 이 key 때문에 HTTP 400을
-반환하면 client가 key를 제거하고 한 번 재시도하며, 경고를 명확히 로그에 남긴
-뒤 이후로는 서버 기본값을 따른다. 이 경우 `summary.json`에
-`"thinking_control": false`로 기록된다.
+thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한다.
+
+| stage | thinking |
+| --- | --- |
+| BOOTSTRAP | off |
+| PLAN | on |
+| ACTION (patch·rewrite 모두) | off |
+| VERIFY | on (`--verify human` 이면 호출 자체가 없다) |
+
+서버가 이 key 때문에 HTTP 400을 반환하면 client가 key를 제거하고 한 번
+재시도하며, 경고를 명확히 로그에 남긴 뒤 이후로는 서버 기본값을 따른다. 이
+재시도는 일반 retry 예산과 별개라서 `retries = 1`이어도 동작한다. 이 경우
+`summary.json`에 `"thinking_control": false`로 기록된다.
 
 ## 테스트
 
@@ -308,8 +334,19 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌리고, 산출물
-구조와 keep / revert / reject / done 동작을 검증한다.
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 47개가
+다루는 범위:
+
+* 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
+  복원하는지
+* patch 가드 — `find`가 없거나 여러 곳에 매칭되거나 no-op이거나 형식이 잘못된
+  edit 전부 거부, 뒤쪽 edit이 실패하면 앞쪽도 적용되지 않음
+* ACTION 입력이 잘리지 않고 전달되는지, `finish_reason=length`가 라운드를
+  거부하는지
+* renderer `/probe` 계약 위반 감지, `ok:false`가 예외를 던지는지
+* `chat_template_kwargs` 400 fallback (`retries=1` 포함)
+* 사람 개입 — 메모 주입, PLAN 지시, VERIFY 오버라이드, `--verify human`,
+  개입 기록의 정합성
 
 ### 2. 실제 브라우저 렌더러 (Chromium 필요)
 
