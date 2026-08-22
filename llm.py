@@ -127,8 +127,10 @@ class QwenClient:
 
         last_error: Exception | None = None
         attempts = max(1, self.cfg.retries)
+        attempt = 0
 
-        for attempt in range(1, attempts + 1):
+        while attempt < attempts:
+            attempt += 1
             try:
                 LOG.info(
                     "[%s] LLM call attempt %d/%d (thinking=%s%s)",
@@ -157,6 +159,9 @@ class QwenClient:
                     )
                     payload.pop("chat_template_kwargs", None)
                     self.supports_thinking_flag = False
+                    # This retry is extra: it must not eat into the retry budget
+                    # reserved for genuine transient failures.
+                    attempts += 1
                     continue
 
             except (urllib.error.URLError, TimeoutError) as exc:

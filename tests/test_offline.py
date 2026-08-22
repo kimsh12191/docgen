@@ -140,6 +140,18 @@ def test_thinking_fallback() -> None:
         assert resp.content == "ok", resp.content
         assert client.supports_thinking_flag is False, "flag should be disabled after the 400"
         ok("400 -> key dropped, retried once, flag disabled")
+
+        # The fallback retry must be extra, not taken from the retry budget,
+        # so it still happens when retries is 1.
+        cfg2 = load_config()
+        cfg2.llm.base_url = f"{url}/v1"
+        cfg2.llm.timeout = 20
+        cfg2.llm.retries = 1
+        client2 = QwenClient(cfg2.llm)
+        resp2 = client2.chat([user_message("hello")], thinking=True, stage="test")
+        assert resp2.content == "ok", resp2.content
+        assert client2.supports_thinking_flag is False
+        ok("fallback still retries when retries=1")
     finally:
         mock_services.LLMHandler.reject_thinking = False
 
