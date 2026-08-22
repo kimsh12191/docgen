@@ -257,6 +257,11 @@ class Pipeline:
         print("\n--- PLAN ---")
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         answer = self._ask("추가 지시 (Enter=수락, s=이 라운드 건너뛰기): ")
+        if answer.lower() in ("keep", "revert", "done"):
+            # The two prompts look alike; a VERIFY answer typed here would be
+            # injected into the plan as a nonsense instruction.
+            print(f"'{answer}' 는 VERIFY 판정어입니다. 여기는 PLAN 단계입니다.")
+            answer = self._ask("추가 지시 (Enter=수락, s=이 라운드 건너뛰기): ")
         if answer.lower() == "s":
             raise SkipRound("operator skipped the round")
         if answer:
@@ -324,7 +329,7 @@ class Pipeline:
                 action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
-                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}"))
+                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=bool(plan.get("operator_instruction"))))
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
@@ -346,7 +351,7 @@ class Pipeline:
                 candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc)))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=bool(plan.get("operator_instruction"))))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (invalid HTML)")
                 write_json(rdir / "error.json", {"stage": "apply", "error": str(exc)})
                 continue
@@ -354,7 +359,7 @@ class Pipeline:
 
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
-                results.append(RoundResult(index, "noop", mode=mode, plan=plan))
+                results.append(RoundResult(index, "noop", mode=mode, plan=plan, operator=bool(plan.get("operator_instruction"))))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> no change produced")
                 continue
 
@@ -363,7 +368,7 @@ class Pipeline:
                 candidate_png, metrics = self.render(candidate_html)
             except RendererError as exc:
                 LOG.warning("round %d: candidate failed to render: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}"))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=bool(plan.get("operator_instruction"))))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (render failed)")
                 write_json(rdir / "error.json", {"stage": "render", "error": str(exc)})
                 continue
@@ -377,7 +382,7 @@ class Pipeline:
                 )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
-                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}"))
+                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=bool(plan.get("operator_instruction"))))
                 write_json(rdir / "error.json", {"stage": "verify", "error": str(exc)})
                 continue
             write_json(rdir / "verify.json", verdict)

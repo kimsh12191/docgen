@@ -432,6 +432,13 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     assert pipe.interventions == 1
     ok("operator instruction lands in plan.json, which ACTION receives verbatim")
 
+    # --- a VERIFY decision word typed at the PLAN prompt is caught, not injected
+    replies = iter(["revert", "제목부터"])
+    pipe._ask = lambda _p: next(replies)
+    plan = pipe.review_plan({"scope": "local"})
+    assert plan["operator_instruction"] == "제목부터", plan
+    ok("a VERIFY decision word typed at the PLAN prompt is re-asked, not injected")
+
     # --- interactive: skipping a round
     pipe._ask = lambda _p: "s"
     try:
@@ -482,6 +489,10 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     assert summary["operator_notes"] == note
     assert summary["operator_interventions"] >= 1, summary
     assert summary["rounds"][0]["operator"] is True, summary["rounds"][0]
+    # Every round the operator touched must be flagged, even ones that ended
+    # early -- otherwise the intervention count and the flags disagree.
+    flagged = sum(1 for r in summary["rounds"] if r["operator"])
+    assert flagged == summary["operator_rounds"] >= 1, (flagged, summary["operator_rounds"])
     assert json.loads((out / "rounds" / "r01" / "verify.json").read_text())["model_decision"] == "keep"
     ok(f"summary.json records {summary['operator_interventions']} intervention(s) "
        f"across {summary['operator_rounds']} round(s)")
