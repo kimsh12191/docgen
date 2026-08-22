@@ -137,6 +137,19 @@ def cmd_render(args, cfg) -> int:
 
 # ----------------------------------------------------------------------- build
 
+def _operator_notes(args) -> str:
+    """Collect --note / --notes-file into one block of operator context."""
+    parts: list[str] = []
+    if args.notes_file:
+        path = Path(args.notes_file)
+        if not path.exists():
+            raise FileNotFoundError(f"메모 파일을 찾을 수 없습니다: {path}")
+        parts.append(read_text(path).strip())
+    for note in args.note or []:
+        parts.append(note.strip())
+    return "\n".join(p for p in parts if p)
+
+
 def cmd_build(args, cfg) -> int:
     from pipeline import Pipeline
 
@@ -151,6 +164,23 @@ def cmd_build(args, cfg) -> int:
     if args.max_rounds:
         cfg.loop.max_rounds = args.max_rounds
 
+    try:
+        notes = _operator_notes(args)
+    except FileNotFoundError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 1
+
+    interactive = args.interactive
+    if interactive and not sys.stdin.isatty():
+        # A blocked input() in a batch run would hang the whole build.
+        print("경고: 대화형 입력을 받을 수 없는 환경이라 --interactive 를 끕니다",
+              file=sys.stderr)
+        interactive = False
+    if notes:
+        print(f"운영자 메모 {len(notes)}자를 PLAN/VERIFY 프롬프트에 넣습니다")
+    if interactive:
+        print("대화형 모드: 매 라운드 PLAN과 VERIFY에서 개입할 수 있습니다")
+
     # The renderer is a hard dependency of the loop: do not start without it.
     renderer = RendererClient(
         base_url=cfg.renderer.url,
@@ -164,7 +194,7 @@ def cmd_build(args, cfg) -> int:
         return 1
 
     try:
-        summary = Pipeline(cfg, out_dir).build(source)
+        summary = Pipeline(cfg, out_dir, notes=notes, interactive=interactive).build(source)
     except (RendererError, LLMError, RuntimeError, FileNotFoundError) as exc:
         LOG.error("build failed: %s", exc)
         print(f"빌드 실패: {exc}", file=sys.stderr)
@@ -178,6 +208,12 @@ def cmd_build(args, cfg) -> int:
         "라운드     : 총 {rounds_run}회 / 반영(keep) {kept} / 되돌림(revert) {reverted} / "
         "거부(reject) {rejected} / 오류 {errors}".format(**summary)
     )
+    if summary["operator_interventions"] or summary["skipped"]:
+        print(
+            "사람 개입   : {operator_interventions}회 "
+            "({operator_rounds}개 라운드, 건너뜀 {skipped}개) "
+            "— 모델 단독 성능 평가에서 제외할 라운드입니다".format(**summary)
+        )
     if not summary["thinking_control"]:
         print("주의: 서버가 chat_template_kwargs 를 거부해서 stage별 thinking 제어 없이 실행되었습니다")
     return 0
@@ -212,6 +248,17 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("source", help="입력 문서 PNG")
     build.add_argument("-o", "--output", help="출력 디렉터리 (기본값 out/<이름>)")
     build.add_argument("--max-rounds", type=int, help="최대 라운드 수 (기본값은 config)")
+    build.add_argument(
+        "--note",
+        action="append",
+        help="PLAN/VERIFY에 넣을 운영자 메모. 여러 번 쓸 수 있다",
+    )
+    build.add_argument("--notes-file", help="운영자 메모를 담은 텍스트 파일")
+    build.add_argument(
+        "--interactive",
+        action="store_true",
+        help="매 라운드 PLAN에 지시를 덧붙이고 VERIFY 판정을 뒤집을 수 있다",
+    )
     build.set_defaults(func=cmd_build)
 
     return parser

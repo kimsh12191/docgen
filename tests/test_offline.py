@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import mock_services  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 
+import prompts  # noqa: E402
 import utils  # noqa: E402
 from config import load_config  # noqa: E402
 from llm import QwenClient, image_part, system_message, user_message  # noqa: E402
@@ -379,6 +380,114 @@ def test_patch_artifacts() -> None:
 
 
 
+
+
+# ------------------------------------------------------ 9. operator in the loop
+
+def test_operator(llm_base: str, renderer_url: str) -> None:
+    print("[9] operator notes and interactive override")
+    import shutil
+
+    from pipeline import Pipeline, SkipRound
+
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 2
+
+    # --- notes reach both PLAN and VERIFY prompts
+    note = "표 정렬이 이 문서에서 가장 중요하다."
+    seen: list[str] = []
+    pipe = Pipeline(cfg, ROOT / "out" / "op_probe", notes=note)
+    original = pipe.llm.chat
+
+    def spy(messages, **kw):
+        for part in messages[-1]["content"]:
+            if part.get("type") == "text":
+                seen.append(part["text"])
+        return original(messages, **kw)
+
+    pipe.llm.chat = spy
+    src = make_source_png(Path("tmp/source_fixture.png"))
+    mock_services.LLMHandler.plan_calls = 0
+    png, _ = pipe.render(mock_services.GOOD_HTML.format(title=28, table_width="60%", rev=0))
+    pipe.plan(src, png, [])
+    pipe.verify({"goal": "g"}, src, png, png)
+    assert sum(1 for t in seen if note in t) == 2, "notes must reach PLAN and VERIFY"
+    assert any("Judge the images first" in t for t in seen)
+    ok("operator notes injected into PLAN and VERIFY, with the images-first caveat")
+
+    # --- an empty note changes nothing
+    plain = Pipeline(cfg, ROOT / "out" / "op_probe", notes="   ")
+    assert prompts.notes_block(plain.notes) == ""
+    ok("blank notes add nothing to the prompts")
+
+    # --- interactive: instruction reaches ACTION via the plan JSON
+    pipe.interactive = True
+    pipe._ask = lambda _p: "제목 크기부터 맞춰라"
+    plan = pipe.review_plan({"scope": "local", "goal": "g"})
+    assert plan["operator_instruction"] == "제목 크기부터 맞춰라", plan
+    assert pipe.interventions == 1
+    ok("operator instruction lands in plan.json, which ACTION receives verbatim")
+
+    # --- interactive: skipping a round
+    pipe._ask = lambda _p: "s"
+    try:
+        pipe.review_plan({"scope": "local"})
+    except SkipRound:
+        ok("operator can skip a round")
+    else:
+        raise AssertionError("skip was not honoured")
+
+    # --- interactive: overriding VERIFY, keeping the model's own verdict
+    pipe._ask = lambda _p: "revert"
+    verdict = pipe.review_verify({"decision": "keep", "reason": "looks better"})
+    assert verdict["decision"] == "revert", verdict
+    assert verdict["model_decision"] == "keep", verdict
+    assert verdict["operator_override"] == "revert", verdict
+    ok("VERIFY override applied, model_decision preserved for honest evaluation")
+
+    # --- an override equal to the model's decision is not counted as intervention
+    before = pipe.interventions
+    pipe._ask = lambda _p: "keep"
+    pipe.review_verify({"decision": "keep"})
+    assert pipe.interventions == before
+    ok("agreeing with the model is not recorded as an intervention")
+
+    # --- garbage input leaves the verdict alone
+    pipe._ask = lambda _p: "asdf"
+    v = pipe.review_verify({"decision": "done"})
+    assert v["decision"] == "done" and "operator_override" not in v
+    ok("unrecognised input leaves the model verdict untouched")
+
+    # --- non-interactive pipelines never prompt
+    quiet = Pipeline(cfg, ROOT / "out" / "op_probe")
+    def boom(_p):
+        raise AssertionError("must not prompt when interactive is off")
+    quiet._ask = boom
+    assert quiet.review_plan({"scope": "local"}) == {"scope": "local"}
+    assert quiet.review_verify({"decision": "keep"})["decision"] == "keep"
+    ok("non-interactive runs never block on input")
+
+    # --- a full build records the intervention counts
+    mock_services.LLMHandler.plan_calls = 0
+    out = ROOT / "out" / "op_build"
+    if out.exists():
+        shutil.rmtree(out)
+    run = Pipeline(cfg, out, notes=note, interactive=True)
+    run._ask = lambda p: "revert" if "판정" in p else ""
+    summary = run.build(src)
+    assert summary["operator_notes"] == note
+    assert summary["operator_interventions"] >= 1, summary
+    assert summary["rounds"][0]["operator"] is True, summary["rounds"][0]
+    assert json.loads((out / "rounds" / "r01" / "verify.json").read_text())["model_decision"] == "keep"
+    ok(f"summary.json records {summary['operator_interventions']} intervention(s) "
+       f"across {summary['operator_rounds']} round(s)")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -392,6 +501,7 @@ def main() -> int:
     test_truncation(llm_base, renderer_url)
     test_patch_mode()
     test_patch_artifacts()
+    test_operator(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

@@ -33,12 +33,17 @@ LOG = logging.getLogger("docgen.pipeline")
 HTML_WARN_SIZE = 60000
 
 
+class SkipRound(Exception):
+    """Raised when the operator chooses to skip the current round."""
+
+
 @dataclass
 class RoundResult:
     index: int
     decision: str
     reason: str = ""
     mode: str = ""
+    operator: bool = False
     plan: dict = field(default_factory=dict)
     verify: dict = field(default_factory=dict)
     error: str = ""
@@ -52,8 +57,17 @@ class RoundResult:
 
 
 class Pipeline:
-    def __init__(self, cfg: Config, out_dir: str | Path) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        out_dir: str | Path,
+        notes: str = "",
+        interactive: bool = False,
+    ) -> None:
         self.cfg = cfg
+        self.notes = (notes or "").strip()
+        self.interactive = interactive
+        self.interventions = 0
         self.llm = QwenClient(cfg.llm)
         self.renderer = RendererClient(
             base_url=cfg.renderer.url,
@@ -112,6 +126,9 @@ class Pipeline:
     def plan(self, source_png: Path, current_png: bytes, history: list[str]) -> dict:
         """PLAN. Thinking ON. Images are the primary evidence."""
         text = prompts.PLAN_USER
+        notes = prompts.notes_block(self.notes)
+        if notes:
+            text = f"{text}\n\n{notes}"
         hist = prompts.history_block(history)
         if hist:
             text = f"{text}\n\n{hist}"
@@ -199,6 +216,9 @@ class Pipeline:
     def verify(self, plan: dict, source_png: Path, before_png: bytes, candidate_png: bytes) -> dict:
         """VERIFY. Thinking ON. Three images: source, before, after."""
         text = prompts.VERIFY_USER.format(plan=json.dumps(plan, ensure_ascii=False, indent=2))
+        notes = prompts.notes_block(self.notes)
+        if notes:
+            text = f"{text}\n\n{notes}"
         messages = [
             system_message(prompts.VERIFY_SYSTEM),
             user_message(
@@ -218,6 +238,48 @@ class Pipeline:
             verdict["decision"] = decision
             verdict.setdefault("reason", "unparsable decision")
         LOG.info("VERIFY: %s (%s)", decision, truncate(str(verdict.get("reason", "")), 100))
+        return verdict
+
+    # -------------------------------------------------------- operator input
+
+    def _ask(self, prompt: str) -> str:
+        if not self.interactive:
+            return ""
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+    def review_plan(self, plan: dict) -> dict:
+        """Let the operator steer the plan before ACTION turns it into an edit."""
+        if not self.interactive:
+            return plan
+        print("\n--- PLAN ---")
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        answer = self._ask("추가 지시 (Enter=수락, s=이 라운드 건너뛰기): ")
+        if answer.lower() == "s":
+            raise SkipRound("operator skipped the round")
+        if answer:
+            # Lands in the plan JSON, which ACTION receives verbatim.
+            plan["operator_instruction"] = answer
+            self.interventions += 1
+            LOG.info("PLAN: operator added an instruction")
+        return plan
+
+    def review_verify(self, verdict: dict) -> dict:
+        """Let the operator overrule the model's own judgement of its edit."""
+        if not self.interactive:
+            return verdict
+        print("\n--- VERIFY ---")
+        print(json.dumps(verdict, ensure_ascii=False, indent=2))
+        answer = self._ask("판정 (Enter=수락, keep/revert/done=강제): ").lower()
+        if answer in ("keep", "revert", "done") and answer != verdict.get("decision"):
+            # Keep the model's own verdict so evaluation is not contaminated.
+            verdict["model_decision"] = verdict.get("decision")
+            verdict["operator_override"] = answer
+            verdict["decision"] = answer
+            self.interventions += 1
+            LOG.info("VERIFY: operator overrode %s -> %s", verdict["model_decision"], answer)
         return verdict
 
     # ------------------------------------------------------------------ loop
@@ -243,6 +305,12 @@ class Pipeline:
             # PLAN
             try:
                 plan = self.plan(source_png, current_png, history)
+                plan = self.review_plan(plan)
+            except SkipRound as exc:
+                LOG.info("round %d: %s", index, exc)
+                results.append(RoundResult(index, "skipped", operator=True))
+                history.append(f"Round {index}: skipped by the operator")
+                continue
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: PLAN failed: %s", index, exc)
                 results.append(RoundResult(index, "error", error=f"plan: {exc}"))
@@ -304,7 +372,9 @@ class Pipeline:
 
             # VERIFY
             try:
-                verdict = self.verify(plan, source_png, current_png, candidate_png)
+                verdict = self.review_verify(
+                    self.verify(plan, source_png, current_png, candidate_png)
+                )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
                 results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}"))
@@ -315,7 +385,17 @@ class Pipeline:
 
             decision = verdict["decision"]
             reason = str(verdict.get("reason", ""))
-            results.append(RoundResult(index, decision, reason=reason, mode=mode, plan=plan, verify=verdict))
+            results.append(
+                RoundResult(
+                    index,
+                    decision,
+                    reason=reason,
+                    mode=mode,
+                    operator=bool(verdict.get("operator_override") or plan.get("operator_instruction")),
+                    plan=plan,
+                    verify=verdict,
+                )
+            )
             history.append(RoundResult(index, decision, plan=plan).history_line())
 
             if decision in ("keep", "done"):
@@ -345,12 +425,17 @@ class Pipeline:
             "reverted": sum(1 for r in results if r.decision == "revert"),
             "rejected": sum(1 for r in results if r.decision in ("rejected", "noop")),
             "errors": sum(1 for r in results if r.decision == "error"),
+            "skipped": sum(1 for r in results if r.decision == "skipped"),
+            "operator_notes": self.notes,
+            "operator_interventions": self.interventions,
+            "operator_rounds": sum(1 for r in results if r.operator),
             "thinking_control": self.llm.supports_thinking_flag,
             "rounds": [
                 {
                     "round": r.index,
                     "decision": r.decision,
                     "mode": r.mode,
+                    "operator": r.operator,
                     "scope": r.plan.get("scope", ""),
                     "target": r.plan.get("target", ""),
                     "goal": r.plan.get("goal", ""),

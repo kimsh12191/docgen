@@ -105,6 +105,57 @@ out/sample/
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
 `summary.json`은 라운드별로 어느 모드였는지(`mode`)를 함께 기록한다.
 
+## 사람이 개입하기 (선택)
+
+PLAN이 엉뚱한 것을 우선순위로 집거나, VERIFY가 자기가 한 수정에 관대할 때 쓴다.
+둘 다 옵션이고 기본값은 꺼져 있다.
+
+### 운영자 메모 — 배치 실행에서도 쓸 수 있다
+
+```bash
+python run.py build sample.png --note "표 정렬이 이 문서에서 가장 중요하다"
+python run.py build sample.png --notes-file notes.txt
+```
+
+메모는 PLAN과 VERIFY 프롬프트에 함께 들어간다. "지금 무엇이 잘못됐다"는 서술이
+아니라 **이 문서에서 무엇이 중요한지**를 적는 자리다. 프롬프트에는 "메모를 현재
+문제의 설명으로 받아들이지 말고, 이미지를 먼저 판단하라"는 지시가 붙어 있어서
+메모가 눈앞의 렌더 판단을 덮어쓰지 않는다.
+
+### 대화형 — 라운드마다 개입
+
+```bash
+python run.py build sample.png --interactive
+```
+
+PLAN 직후와 VERIFY 직후에 멈춘다.
+
+| 지점 | 입력 | 결과 |
+| --- | --- | --- |
+| PLAN | Enter | 계획 그대로 수락 |
+| PLAN | 아무 텍스트 | `plan.json`의 `operator_instruction`으로 들어가고, ACTION이 그대로 받는다 |
+| PLAN | `s` | 이 라운드를 건너뛴다 |
+| VERIFY | Enter | 모델 판정 수락 |
+| VERIFY | `keep` / `revert` / `done` | 판정을 강제한다 |
+
+stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 남기고 자동으로
+꺼진다. 입력을 기다리다 빌드가 멈추는 일은 없다.
+
+### 개입은 전부 따로 기록된다
+
+이게 중요하다. 사람이 구해준 것과 모델이 스스로 한 것을 구분하지 못하면
+"Qwen이 이 작업을 할 수 있나"라는 판단이 오염된다.
+
+* VERIFY 판정을 뒤집으면 모델의 원래 판정이 `verify.json`의 `model_decision`에
+  그대로 남는다. `operator_override`에 사람이 고른 값이 들어간다.
+* `summary.json`에 `operator_notes`(어떤 메모로 돌렸는지),
+  `operator_interventions`(라운드별 개입 횟수), `operator_rounds`(개입이 있었던
+  라운드 수), `skipped`(건너뛴 라운드 수)가 남는다.
+* 라운드별로도 `operator: true/false`가 붙는다.
+
+모델 단독 성능을 보려면 메모 없이 `--interactive` 없이 돌린 실행을 봐야 한다.
+개입이 섞인 실행에서는 `operator: true`인 라운드를 제외하고 읽는다.
+
 ## 결과 읽는 법
 
 먼저 `clone.png`와 입력 PNG를 나란히 놓고 눈으로 본다. 그게 이 도구의 목표다.
@@ -131,6 +182,8 @@ out/sample/
 | `errors` | LLM 호출 자체가 실패한 라운드 수 |
 | `mode` | 그 라운드가 `patch`였는지 `rewrite`였는지 |
 | `thinking_control` | `false`면 서버가 `chat_template_kwargs`를 거부해 stage별 thinking 제어 없이 돌았다는 뜻 |
+| `operator_interventions` | 사람이 PLAN에 지시를 넣거나 VERIFY 판정을 뒤집은 횟수. `0`이면 모델 단독 실행 |
+| `skipped` | 사람이 건너뛴 라운드 수 |
 
 건강한 실행은 `kept`가 대부분이고 `stop_reason`이 `done`이다.
 `reverted`가 섞이는 것은 정상이다 — VERIFY가 제 역할을 했다는 신호다.

@@ -131,6 +131,20 @@ Return JSON only:
 }}"""
 
 
+OPERATOR_NOTES_RULE = (
+    "Do not treat these notes as a description of what is currently wrong.\n"
+    "Judge the images first; the notes only tell you what matters in this document."
+)
+
+
+def notes_block(notes: str) -> str:
+    """Operator-supplied context for PLAN and VERIFY. Empty string when unset."""
+    notes = (notes or "").strip()
+    if not notes:
+        return ""
+    return f"Notes from the operator about this document:\n{notes}\n\n{OPERATOR_NOTES_RULE}"
+
+
 def history_block(entries: list[str], limit: int = 3) -> str:
     """Short recent-history block for PLAN. Empty string when there is none."""
     recent = [e for e in entries if e][-limit:]
