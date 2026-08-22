@@ -52,7 +52,39 @@ Return JSON only:
 
 ACTION_SYSTEM = "You edit HTML precisely and conservatively."
 
-ACTION_USER = """Image 1 is the source document.
+# Local edits come back as exact string replacements, so the response size
+# tracks the size of the edit instead of the size of the document.
+ACTION_PATCH_USER = """Image 1 is the source document.
+Image 2 is the current HTML render.
+
+This is the plan for the next edit:
+{plan}
+
+Here is the current HTML:
+```html
+{html}
+```
+
+Apply the plan by editing the HTML.
+
+Change only what is necessary to achieve the plan.
+Preserve parts that already match.
+
+Express the edit as exact string replacements.
+Each "find" must appear EXACTLY ONCE in the HTML above.
+Copy it verbatim, including whitespace and punctuation.
+Keep each "find" as short as possible while still being unique - normally a
+single CSS declaration, one attribute, one tag, or one table row.
+Do not return the whole document.
+
+Return JSON only:
+{{
+  "edits": [
+    {{"find": "exact text taken from the HTML above", "replace": "text to put in its place"}}
+  ]
+}}"""
+
+ACTION_REWRITE_USER = """Image 1 is the source document.
 Image 2 is the current HTML render.
 
 This is the plan for the next edit:

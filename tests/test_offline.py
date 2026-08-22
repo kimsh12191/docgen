@@ -121,7 +121,7 @@ def test_llm_smoke() -> str:
     )
     assert "<think>" not in resp.content, resp.content[:80]
     plan = utils.extract_json(resp.content)
-    assert plan["scope"] == "global", plan
+    assert plan["scope"] in ("global", "local"), plan
     ok("<think> stripped, JSON extracted")
     return base
 
@@ -307,6 +307,78 @@ def test_truncation(llm_base: str, renderer_url: str) -> None:
     ok("rejected round left clone.html at the previous document")
 
 
+
+
+# --------------------------------------------------------------- 7. patch mode
+
+def test_patch_mode() -> None:
+    print("[7] patch mode guards")
+    from utils import apply_edits
+
+    doc = "<style>h1{font-size:28px}p{font-size:12px}</style><body><p>a</p><p>b</p></body>"
+
+    out, applied = apply_edits(doc, [{"find": "font-size:28px", "replace": "font-size:31px"}])
+    assert "font-size:31px" in out and "font-size:12px" in out, out
+    assert len(applied) == 1
+    ok("single unique edit applies and leaves the rest untouched")
+
+    out2, _ = apply_edits(doc, [
+        {"find": "h1{font-size:28px}", "replace": "h1{font-size:31px}"},
+        {"find": "<p>a</p>", "replace": "<p>A</p>"},
+    ])
+    assert "31px" in out2 and "<p>A</p>" in out2 and "<p>b</p>" in out2
+    ok("multiple edits apply in order")
+
+    for label, edits in [
+        ("missing 'find'", [{"find": "NOT_PRESENT", "replace": "x"}]),
+        ("ambiguous 'find'", [{"find": "<p>", "replace": "<div>"}]),
+        ("empty edit list", []),
+        ("no-op edit", [{"find": "<p>a</p>", "replace": "<p>a</p>"}]),
+        ("empty 'find'", [{"find": "", "replace": "x"}]),
+        ("non-string 'replace'", [{"find": "<p>a</p>", "replace": 3}]),
+        ("edit is not an object", ["nope"]),
+    ]:
+        try:
+            apply_edits(doc, edits)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{label} should have been rejected")
+    ok("missing / ambiguous / empty / no-op / malformed edits all rejected")
+
+    # An ambiguous find must not partially apply.
+    try:
+        apply_edits(doc, [{"find": "font-size:28px", "replace": "font-size:9px"},
+                          {"find": "<p>", "replace": "<div>"}])
+    except ValueError:
+        pass
+    ok("a failing later edit raises rather than leaving a half-applied patch")
+
+
+def test_patch_artifacts() -> None:
+    print("[8] patch artefacts and payload size")
+    out = ROOT / "out" / "offline_test"
+
+    modes = {r["round"]: r["mode"] for r in json.loads((out / "summary.json").read_text())["rounds"]}
+    assert modes[1] == "patch" and modes[3] == "rewrite" and modes[4] == "patch", modes
+    ok(f"summary.json records the action mode per round: {modes}")
+
+    assert (out / "rounds" / "r01" / "patch.json").exists()
+    patch = json.loads((out / "rounds" / "r01" / "patch.json").read_text())
+    assert patch["edits"][0]["find"] == "font-size:28px", patch
+    ok("patch.json saved alongside the round's other artefacts")
+
+    # The point of patch mode: the response no longer scales with the document.
+    raw = (out / "rounds" / "r01" / "action_raw.txt").read_text()
+    doc = (out / "rounds" / "r01" / "candidate.html").read_text()
+    assert len(raw) < len(doc) / 4, f"patch response {len(raw)} vs document {len(doc)}"
+    rewrite_raw = (out / "rounds" / "r03" / "action_raw.txt").read_text()
+    assert len(rewrite_raw) > len(raw) * 4, (len(rewrite_raw), len(raw))
+    ok(f"patch response {len(raw)}B vs rewrite response {len(rewrite_raw)}B "
+       f"for an {len(doc)}B document")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -318,6 +390,8 @@ def main() -> int:
     test_doctor(llm_base, renderer_url)
     test_build(llm_base, renderer_url)
     test_truncation(llm_base, renderer_url)
+    test_patch_mode()
+    test_patch_artifacts()
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

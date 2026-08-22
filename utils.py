@@ -174,6 +174,45 @@ def html_sanity_check(html: str, min_length: int = 200) -> tuple[bool, str]:
     return True, "ok"
 
 
+def apply_edits(html: str, edits) -> tuple[str, list[str]]:
+    """Apply exact search/replace edits in order.
+
+    Every `find` must match exactly once at the moment it is applied. An edit
+    that is missing, ambiguous, or a no-op raises instead of being skipped: a
+    partially applied patch is worse than a rejected round, because VERIFY would
+    then judge an edit that never fully happened.
+    """
+    if not isinstance(edits, list) or not edits:
+        raise ValueError("patch contained no edits")
+
+    out = html
+    applied: list[str] = []
+    for index, edit in enumerate(edits, 1):
+        if not isinstance(edit, dict):
+            raise ValueError(f"edit {index} is not an object")
+        find = edit.get("find")
+        replace = edit.get("replace")
+        if not isinstance(find, str) or not find:
+            raise ValueError(f"edit {index} has an empty 'find'")
+        if not isinstance(replace, str):
+            raise ValueError(f"edit {index} has a non-string 'replace'")
+        if find == replace:
+            raise ValueError(f"edit {index} is a no-op")
+
+        hits = out.count(find)
+        if hits == 0:
+            raise ValueError(f"edit {index} 'find' is not in the document: {find[:100]!r}")
+        if hits > 1:
+            raise ValueError(
+                f"edit {index} 'find' matches {hits} places, it must be unique: {find[:100]!r}"
+            )
+
+        out = out.replace(find, replace, 1)
+        applied.append(f"{find[:60]!r} -> {replace[:60]!r}")
+
+    return out, applied
+
+
 def extract_json(text: str) -> dict:
     """Pull the first balanced JSON object out of a model response."""
     body = strip_code_fences(strip_think(text))

@@ -12,6 +12,7 @@ from config import Config
 from llm import LLMError, QwenClient, image_part, system_message, user_message
 from renderer import RendererClient, RendererError
 from utils import (
+    apply_edits,
     clean_html_output,
     ensure_dir,
     extract_json,
@@ -37,6 +38,7 @@ class RoundResult:
     index: int
     decision: str
     reason: str = ""
+    mode: str = ""
     plan: dict = field(default_factory=dict)
     verify: dict = field(default_factory=dict)
     error: str = ""
@@ -133,16 +135,28 @@ class Pipeline:
 
     # ---------------------------------------------------------------- action
 
+    @staticmethod
+    def action_mode(plan: dict) -> str:
+        """PLAN already decides global vs local; that is the mode switch.
+
+        local  -> patch:   exact search/replace, response size tracks the edit
+        global -> rewrite: full document, needed when the layout is restructured
+        """
+        scope = str(plan.get("scope", "")).strip().lower()
+        return "patch" if scope.startswith("local") else "rewrite"
+
     def action(self, plan: dict, current_html: str, source_png: Path, current_png: bytes):
-        """ACTION. Thinking OFF. Returns the LLMResponse (caller checks finish_reason)."""
-        if len(current_html) > HTML_WARN_SIZE:
+        """ACTION. Thinking OFF. Returns (mode, LLMResponse)."""
+        mode = self.action_mode(plan)
+        if mode == "rewrite" and len(current_html) > HTML_WARN_SIZE:
             LOG.warning(
                 "ACTION is rewriting a %d-char document; a full rewrite this large "
                 "risks hitting max_tokens=%s and being rejected",
                 len(current_html),
                 self.cfg.llm.max_tokens,
             )
-        text = prompts.ACTION_USER.format(
+        template = prompts.ACTION_PATCH_USER if mode == "patch" else prompts.ACTION_REWRITE_USER
+        text = template.format(
             plan=json.dumps(plan, ensure_ascii=False, indent=2),
             html=current_html,
         )
@@ -154,14 +168,21 @@ class Pipeline:
                 self._img(current_png),
             ),
         ]
-        return self.llm.chat(messages, thinking=False, stage="action")
+        LOG.info("ACTION: mode=%s (scope=%s)", mode, plan.get("scope", "?"))
+        return mode, self.llm.chat(messages, thinking=False, stage=f"action:{mode}")
 
     # ----------------------------------------------------------------- apply
 
     @staticmethod
-    def apply(action_raw: str, previous_html: str) -> str:
-        """APPLY (Python): fence removal + sanity check. Raises on reject."""
-        html = clean_html_output(action_raw)
+    def apply(action_raw: str, previous_html: str, mode: str = "rewrite") -> str:
+        """APPLY (Python). patch -> exact edits, rewrite -> fence removal. Raises on reject."""
+        if mode == "patch":
+            payload = extract_json(action_raw)
+            html, applied = apply_edits(previous_html, payload.get("edits"))
+            LOG.info("APPLY: %d patch edit(s): %s", len(applied), "; ".join(applied)[:300])
+        else:
+            html = clean_html_output(action_raw)
+
         ok, reason = html_sanity_check(html)
         if not ok:
             raise ValueError(f"candidate rejected: {reason}")
@@ -231,7 +252,7 @@ class Pipeline:
 
             # ACTION
             try:
-                action_resp = self.action(plan, current_html, source_png, current_png)
+                mode, action_resp = self.action(plan, current_html, source_png, current_png)
                 action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
@@ -239,6 +260,11 @@ class Pipeline:
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
+            if mode == "patch":
+                try:
+                    write_json(rdir / "patch.json", extract_json(action_raw))
+                except ValueError:
+                    pass  # apply() reports the parse failure with a usable message
 
             # APPLY
             try:
@@ -249,10 +275,10 @@ class Pipeline:
                         f"candidate rejected: ACTION hit max_tokens "
                         f"({self.cfg.llm.max_tokens}); the rewrite is truncated"
                     )
-                candidate_html = self.apply(action_raw, current_html)
+                candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)
-                results.append(RoundResult(index, "rejected", plan=plan, error=str(exc)))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc)))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (invalid HTML)")
                 write_json(rdir / "error.json", {"stage": "apply", "error": str(exc)})
                 continue
@@ -260,7 +286,7 @@ class Pipeline:
 
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
-                results.append(RoundResult(index, "noop", plan=plan))
+                results.append(RoundResult(index, "noop", mode=mode, plan=plan))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> no change produced")
                 continue
 
@@ -269,7 +295,7 @@ class Pipeline:
                 candidate_png, metrics = self.render(candidate_html)
             except RendererError as exc:
                 LOG.warning("round %d: candidate failed to render: %s", index, exc)
-                results.append(RoundResult(index, "rejected", plan=plan, error=f"render: {exc}"))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (render failed)")
                 write_json(rdir / "error.json", {"stage": "render", "error": str(exc)})
                 continue
@@ -281,7 +307,7 @@ class Pipeline:
                 verdict = self.verify(plan, source_png, current_png, candidate_png)
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
-                results.append(RoundResult(index, "error", plan=plan, error=f"verify: {exc}"))
+                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}"))
                 write_json(rdir / "error.json", {"stage": "verify", "error": str(exc)})
                 continue
             write_json(rdir / "verify.json", verdict)
@@ -289,7 +315,7 @@ class Pipeline:
 
             decision = verdict["decision"]
             reason = str(verdict.get("reason", ""))
-            results.append(RoundResult(index, decision, reason=reason, plan=plan, verify=verdict))
+            results.append(RoundResult(index, decision, reason=reason, mode=mode, plan=plan, verify=verdict))
             history.append(RoundResult(index, decision, plan=plan).history_line())
 
             if decision in ("keep", "done"):
@@ -324,6 +350,7 @@ class Pipeline:
                 {
                     "round": r.index,
                     "decision": r.decision,
+                    "mode": r.mode,
                     "scope": r.plan.get("scope", ""),
                     "target": r.plan.get("target", ""),
                     "goal": r.plan.get("goal", ""),

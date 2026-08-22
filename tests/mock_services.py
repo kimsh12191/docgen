@@ -154,10 +154,10 @@ td, th {{ border:1px solid #333; padding:6px 10px; font-size:13px; }}
 </html>"""
 
 
-def _plan_json(target: str, goal: str) -> str:
+def _plan_json(target: str, goal: str, scope: str = "global") -> str:
     return json.dumps(
         {
-            "scope": "global",
+            "scope": scope,
             "target": target,
             "problem": "the render does not match the source",
             "cause": "css sizing",
@@ -255,22 +255,33 @@ class LLMHandler(BaseHTTPRequestHandler):
             with LLMHandler.lock:
                 LLMHandler.plan_calls += 1
                 n = LLMHandler.plan_calls
+            # Rounds 1, 2, 4 are local (patch path); round 3 is global (rewrite path).
+            scope = "global" if n == 3 else "local"
             return (
                 "<think>looking at both images closely</think>"
-                + _plan_json(f"target-{n}", f"goal number {n}"),
+                + _plan_json(f"target-{n}", f"goal number {n}", scope),
                 "plan",
             )
 
-        if "Apply the plan to the HTML" in text:
+        if "Apply the plan" in text:
             assert n_images == 2, f"action must send 2 images, got {n_images}"
             # Record how much of the document ACTION actually received.
             start = text.find("```html\n")
             end = text.find("\n```", start)
             LLMHandler.last_action_html_len = end - start - 8 if start >= 0 and end > start else -1
             n = LLMHandler.plan_calls
-            if n == 2:
-                # Truncated garbage -> APPLY must reject this round.
-                return "<div>oops", "action"
+            patch_mode = "Express the edit as exact string replacements" in text
+
+            if patch_mode:
+                if n == 2:
+                    # 'find' that is not in the document -> APPLY must reject.
+                    edits = [{"find": "THIS_STRING_IS_NOT_IN_THE_DOCUMENT", "replace": "x"}]
+                elif n == 1:
+                    edits = [{"find": "font-size:28px", "replace": "font-size:30px"}]
+                else:
+                    edits = [{"find": "revision 0", "replace": "revision 1"}]
+                return "```json\n" + json.dumps({"edits": edits}) + "\n```", "action"
+
             body = GOOD_HTML.format(title=28 + n * 2, table_width=f"{60 + n * 8}%", rev=n)
             return "```html\n" + body + "\n```", "action"
 

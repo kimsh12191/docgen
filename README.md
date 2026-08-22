@@ -21,8 +21,28 @@ SOURCE PNG -> INITIAL HTML -> RENDER
             done   -> clone.html
 ```
 
-CV 파이프라인, heuristic rule 모음, action DSL은 없다. VLM이 원본과 실제 렌더를
-비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로 판정한다.
+CV 파이프라인, heuristic rule 모음, 구조물별 action 타입은 없다. VLM이 원본과
+실제 렌더를 비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로
+판정한다.
+
+### ACTION의 두 가지 모드
+
+PLAN이 이미 내놓는 `scope`가 그대로 모드 스위치다. 별도 taxonomy는 없다.
+
+| PLAN scope | ACTION 모드 | 모델이 돌려주는 것 |
+| --- | --- | --- |
+| `local` | patch | `{"edits": [{"find": ..., "replace": ...}]}` 정확 문자열 치환 |
+| `global` | rewrite | HTML 전문 |
+| 누락·불명 | rewrite | 안전한 기본값 |
+
+patch 모드는 응답 크기가 **문서 크기가 아니라 수정 크기**에 비례하므로, 빽빽한
+문서에서 ACTION이 `max_tokens`에 걸려 매 라운드 거부되는 문제를 원인 단계에서
+없앤다.
+
+patch의 `find`는 적용 시점에 **정확히 1회** 매칭되어야 한다. 없거나 여러 곳에
+매칭되거나 no-op이면 그 라운드를 거부하고 현재 HTML은 건드리지 않는다. 절반만
+적용된 patch는 거부된 라운드보다 나쁘다 — VERIFY가 실제로 일어나지 않은 수정을
+판정하게 되기 때문이다.
 
 ## 요구 사항
 
@@ -61,15 +81,16 @@ out/sample/
   run.log
   rounds/
     bootstrap.html  bootstrap.png
-    r01/  plan.json  action_raw.txt
+    r01/  plan.json  action_raw.txt  patch.json
           before.html  before.png
           candidate.html  candidate.png
           metrics.json  verify.json
     r02/  ...
 ```
 
-APPLY나 RENDER에서 실패한 라운드는 `candidate.png` 대신 `error.json`을 남기고,
-현재 HTML은 건드리지 않는다.
+`patch.json`은 patch 모드 라운드에만 생긴다. APPLY나 RENDER에서 실패한 라운드는
+`candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
+`summary.json`은 라운드별로 어느 모드였는지(`mode`)를 함께 기록한다.
 
 ## 설정
 
