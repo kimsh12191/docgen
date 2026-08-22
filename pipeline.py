@@ -25,9 +25,11 @@ from utils import (
 
 LOG = logging.getLogger("docgen.pipeline")
 
-# The whole current HTML is fed to ACTION; cap it so a runaway document cannot
-# blow past the context window.
-HTML_LIMIT_FOR_ACTION = 60000
+# ACTION receives the whole current HTML. It is never silently truncated: a
+# model that is shown a cut-off document returns a cut-off document, and the
+# lost content is invisible to every downstream check. Past this size we only
+# warn -- a document this dense is the signal to switch ACTION to patch mode.
+HTML_WARN_SIZE = 60000
 
 
 @dataclass
@@ -131,11 +133,18 @@ class Pipeline:
 
     # ---------------------------------------------------------------- action
 
-    def action(self, plan: dict, current_html: str, source_png: Path, current_png: bytes) -> str:
-        """ACTION. Thinking OFF. Returns the raw model output."""
+    def action(self, plan: dict, current_html: str, source_png: Path, current_png: bytes):
+        """ACTION. Thinking OFF. Returns the LLMResponse (caller checks finish_reason)."""
+        if len(current_html) > HTML_WARN_SIZE:
+            LOG.warning(
+                "ACTION is rewriting a %d-char document; a full rewrite this large "
+                "risks hitting max_tokens=%s and being rejected",
+                len(current_html),
+                self.cfg.llm.max_tokens,
+            )
         text = prompts.ACTION_USER.format(
             plan=json.dumps(plan, ensure_ascii=False, indent=2),
-            html=truncate(current_html, HTML_LIMIT_FOR_ACTION),
+            html=current_html,
         )
         messages = [
             system_message(prompts.ACTION_SYSTEM),
@@ -145,8 +154,7 @@ class Pipeline:
                 self._img(current_png),
             ),
         ]
-        resp = self.llm.chat(messages, thinking=False, stage="action")
-        return resp.content
+        return self.llm.chat(messages, thinking=False, stage="action")
 
     # ----------------------------------------------------------------- apply
 
@@ -223,7 +231,8 @@ class Pipeline:
 
             # ACTION
             try:
-                action_raw = self.action(plan, current_html, source_png, current_png)
+                action_resp = self.action(plan, current_html, source_png, current_png)
+                action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
                 results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}"))
@@ -233,6 +242,13 @@ class Pipeline:
 
             # APPLY
             try:
+                if action_resp.finish_reason == "length":
+                    # The generation was cut off at max_tokens. Whatever HTML it
+                    # contains is incomplete by construction, so never adopt it.
+                    raise ValueError(
+                        f"candidate rejected: ACTION hit max_tokens "
+                        f"({self.cfg.llm.max_tokens}); the rewrite is truncated"
+                    )
                 candidate_html = self.apply(action_raw, current_html)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)

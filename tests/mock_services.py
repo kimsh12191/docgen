@@ -184,6 +184,10 @@ class LLMHandler(BaseHTTPRequestHandler):
     plan_calls = 0
     lock = threading.Lock()
     reject_thinking = os.environ.get("MOCK_LLM_REJECT_THINKING") == "1"
+    # Test knobs for the truncation cases.
+    force_length_on_action = False
+    bootstrap_html_override = None
+    last_action_html_len = None
 
     def log_message(self, *args):
         pass
@@ -225,13 +229,14 @@ class LLMHandler(BaseHTTPRequestHandler):
                         assert part["image_url"]["url"].startswith("data:image/png;base64,")
 
         content, stage = self._respond(text, n_images)
+        finish = "length" if (stage == "action" and LLMHandler.force_length_on_action) else "stop"
         self._send(
             200,
             {
                 "id": "mock",
                 "object": "chat.completion",
                 "model": MODEL,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": finish}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": len(content) // 4},
                 "_stage": stage,
             },
@@ -240,6 +245,8 @@ class LLMHandler(BaseHTTPRequestHandler):
     def _respond(self, text: str, n_images: int) -> tuple[str, str]:
         if "Write HTML that recreates it" in text:
             assert n_images == 1, f"bootstrap must send 1 image, got {n_images}"
+            if LLMHandler.bootstrap_html_override:
+                return LLMHandler.bootstrap_html_override, "bootstrap"
             body = GOOD_HTML.format(title=28, table_width="60%", rev=0)
             return "```html\n" + body + "\n```", "bootstrap"
 
@@ -256,6 +263,10 @@ class LLMHandler(BaseHTTPRequestHandler):
 
         if "Apply the plan to the HTML" in text:
             assert n_images == 2, f"action must send 2 images, got {n_images}"
+            # Record how much of the document ACTION actually received.
+            start = text.find("```html\n")
+            end = text.find("\n```", start)
+            LLMHandler.last_action_html_len = end - start - 8 if start >= 0 and end > start else -1
             n = LLMHandler.plan_calls
             if n == 2:
                 # Truncated garbage -> APPLY must reject this round.

@@ -248,6 +248,65 @@ def test_build(llm_base: str, renderer_url: str) -> None:
     ok("PLAN history limited to 3 entries with the history caveat")
 
 
+
+
+# ------------------------------------------------- 6. truncation failure modes
+
+def test_truncation(llm_base: str, renderer_url: str) -> None:
+    print("[6] ACTION truncation handling")
+    import shutil
+
+    from pipeline import HTML_WARN_SIZE, Pipeline
+
+    # A document larger than the old 60000-char input cap.
+    filler = "".join(
+        f'<tr><td>{i}</td><td>Line item description number {i} for the ledger</td>'
+        f'<td>{i * 7}</td></tr>' for i in range(1, 900)
+    )
+    big = (
+        "<!doctype html><html><head><meta charset='utf-8'><style>"
+        "body{margin:0}.sheet{width:800px;padding:40px}</style></head>"
+        "<body><div class='sheet'><h1>Ledger</h1><table>" + filler
+        + "</table></div></body></html>"
+    )
+    assert len(big) > HTML_WARN_SIZE, len(big)
+
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+
+    mock_services.LLMHandler.plan_calls = 0
+    mock_services.LLMHandler.bootstrap_html_override = big
+    mock_services.LLMHandler.force_length_on_action = True
+    mock_services.LLMHandler.last_action_html_len = None
+    out = ROOT / "out" / "trunc_test"
+    if out.exists():
+        shutil.rmtree(out)
+    try:
+        summary = Pipeline(cfg, out).build(make_source_png(Path("tmp/source_fixture.png")))
+    finally:
+        mock_services.LLMHandler.bootstrap_html_override = None
+        mock_services.LLMHandler.force_length_on_action = False
+
+    # The whole document must reach ACTION -- no silent mid-document cut.
+    seen = mock_services.LLMHandler.last_action_html_len
+    assert seen == len(big), f"ACTION received {seen} of {len(big)} chars"
+    ok(f"ACTION received the full {len(big)}-char document, untruncated")
+
+    # A generation cut off at max_tokens must never be adopted.
+    assert summary["rounds"][0]["decision"] == "rejected", summary["rounds"]
+    assert "max_tokens" in summary["rounds"][0]["error"], summary["rounds"][0]["error"]
+    ok("finish_reason=length rejected the round instead of adopting it")
+
+    # Rejection must leave the current HTML untouched.
+    assert (out / "clone.html").read_text() == big
+    assert not (out / "rounds" / "r01" / "candidate.png").exists()
+    ok("rejected round left clone.html at the previous document")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -258,6 +317,7 @@ def main() -> int:
     test_thinking_fallback()
     test_doctor(llm_base, renderer_url)
     test_build(llm_base, renderer_url)
+    test_truncation(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 
