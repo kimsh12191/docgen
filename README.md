@@ -110,15 +110,50 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 뒤 이후로는 서버 기본값을 따른다. 이 경우 `summary.json`에
 `"thinking_control": false`로 기록된다.
 
-## 오프라인 테스트
+## 테스트
 
-loop 로직 검증에는 실제 서비스가 필요하지 않다.
+`tests/` 아래는 전부 테스트 전용이며 pipeline에서 import하지 않는다. 제품
+코드는 `config.toml`에 설정된 두 HTTP 계약만 알고 있어서, 그 계약을 채우는
+쪽을 바꿔 끼우면 사내망 없이도 루프를 돌릴 수 있다.
+
+### 1. 오프라인 로직 테스트 (아무 것도 필요 없음)
 
 ```bash
 python3 tests/test_offline.py
 ```
 
-동일한 HTTP 계약을 구현한 mock renderer와 mock Qwen을 in-process로 띄운 뒤
-전체 build를 돌려서, 산출물 구조와 keep / revert / reject / done 동작을
-검증한다. `tests/mock_services.py`는 테스트 전용이며 pipeline에서 import하지
-않는다.
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌리고, 산출물
+구조와 keep / revert / reject / done 동작을 검증한다.
+
+### 2. 실제 브라우저 렌더러 (Chromium 필요)
+
+```bash
+pip install playwright        # 브라우저 바이너리는 이미 있다고 가정
+python3 tests/real_renderer.py 38900
+DOCGEN_RENDERER_URL=http://127.0.0.1:38900 python run.py render page.html -o page.png
+```
+
+`/health` + `/probe` 계약을 실제 Chromium으로 구현한다. `probe_js`를 페이지
+안에서 진짜로 평가하므로, probe script가 동작하는지 확인할 때 쓴다.
+
+### 3. Qwen 대신 Claude로 루프 돌리기 (API 키 필요)
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY=...
+python3 tests/claude_llm_adapter.py 38902     # OpenAI 계약 -> Claude API
+python3 tests/real_renderer.py 38900          # 별도 터미널
+
+DOCGEN_LLM_BASE_URL=http://127.0.0.1:38902/v1 \
+DOCGEN_LLM_MODEL=claude-opus-5 \
+DOCGEN_RENDERER_URL=http://127.0.0.1:38900 \
+python run.py build source.png -o out/source
+```
+
+어댑터가 흡수하는 계약 차이:
+
+* `temperature` / `top_p` 는 Claude Opus 5 에서 제거된 파라미터라 전달하지
+  않는다.
+* `chat_template_kwargs.enable_thinking` 은 `true` -> effort high,
+  `false` -> effort low 로 매핑한다. thinking을 완전히 끄지는 않는다.
+* Claude는 thinking을 별도 블록으로 주므로 `<think>` 를 벗겨낼 필요가 없다.

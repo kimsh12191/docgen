@@ -1,0 +1,4 @@
+# Test-only dependencies (tests/). The pipeline itself needs only requirements.txt.
+playwright>=1.40   # tests/real_renderer.py  - real Chromium renderer stand-in
+anthropic>=1.0     # tests/claude_llm_adapter.py - Claude-backed VLM stand-in
+pyflakes
