@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import threading
 import urllib.parse
@@ -437,7 +438,12 @@ class ReviewServer:
             target = (self.out_dir / rel).resolve()
         except OSError:
             return None
-        if not target.is_relative_to(self.out_dir) or target.suffix.lower() != ".png":
+        # os.path.commonpath rather than Path.is_relative_to, which needs 3.9.
+        try:
+            inside = os.path.commonpath([str(self.out_dir), str(target)]) == str(self.out_dir)
+        except ValueError:  # different drives on Windows
+            inside = False
+        if not inside or target.suffix.lower() != ".png":
             LOG.warning("UI refused an image outside the run directory: %r", rel)
             return None
         try:

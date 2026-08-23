@@ -46,13 +46,22 @@ patch의 `find`는 적용 시점에 **정확히 1회** 매칭되어야 한다. �
 
 ## 요구 사항
 
-* Python 3.11 이상 (`tomllib` 사용). 외부 의존성은 Pillow 하나뿐이다
+* **Python 3.8 이상.** 필수 외부 의존성은 Pillow 하나뿐이다
 * **Qwen VLM** OpenAI 호환 endpoint
 * **HTML renderer** 서비스 (이미 별도로 실행 중인 것을 사용한다)
 
 ```bash
 pip install -r requirements.txt
 ```
+
+`config.toml` 을 읽는 방법은 환경에 맞춰 세 단계로 내려간다.
+
+1. **Python 3.11+** — 표준 라이브러리 `tomllib`
+2. **3.11 미만이고 `tomli` 가 설치돼 있으면** — `tomli`
+   (`requirements.txt` 가 3.11 미만에서만 설치한다)
+3. **둘 다 없으면** — 내장 최소 파서. `[section]` 과 `key = value` 만 읽고,
+   그 밖의 TOML 문법(배열·인라인 테이블 등)은 **추측하지 않고 에러를 낸다.**
+   지금 `config.toml` 은 그 범위 안에 있으므로 아무것도 설치하지 않아도 돌아간다.
 
 두 서비스는 사내망에 있다. `10.167.129.250:30164` 와 `10.167.129.230:30900` 에
 접근 가능한 호스트에서 실행해야 한다.
@@ -486,7 +495,7 @@ Already tried without success:
 | --- | --- |
 | `run.py` | CLI: `doctor`, `render`, `build` |
 | `ui.py` | 로컬 검토 UI (표준 라이브러리만). 질문을 띄우고 답을 기다린다. 문서는 `UI_docs/` |
-| `config.py` | `config.toml` 로딩 |
+| `config.py` | `config.toml` 로딩 (tomllib / tomli / 내장 최소 파서) |
 | `llm.py` | Qwen client (표준 `urllib`), message/image helper |
 | `renderer.py` | `/health` + `/probe` client와 probe script |
 | `prompts.py` | stage prompt 5종(bootstrap / plan / action-patch / action-rewrite / verify)과 운영자 메모·계약·영역·history·실패목록 블록 |
@@ -555,6 +564,9 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   crop 2장을 함께 받는지, `compare_region.png` 가 생기는지
 * 라운드 간 전달 — VERIFY의 `reason`·`next_major_issue` 가 다음 PLAN 프롬프트에
   실제로 도달하는지, history 창(3)을 넘어간 실패가 별도 목록으로 남는지
+* 구버전 Python 호환 — `tomllib` 없이도 `config.toml` 이 같은 값·타입으로
+  읽히는지, 최소 파서가 지원 범위 밖 문법을 거부하는지, 3.9/3.10 전용 API를
+  쓰지 않는지
 * 개입 3상태 정합성 — `model` / `model+operator` / `operator` 를 두 단계에서
   전부 열거해, 누가 판정했는지 · 라운드 플래그 · history 태그 · 실려 가는 근거가
   서로 일치하는지. 이 판단을 필드 조합으로 다시 추론하는 코드가 없는지도 확인한다

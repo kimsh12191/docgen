@@ -3,9 +3,71 @@
 from __future__ import annotations
 
 import os
-import tomllib
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+# tomllib is only in the standard library from Python 3.11. Rather than make the
+# whole project need 3.11 for one config file, fall back: tomli if it happens to
+# be installed, then a parser for the small subset this project's config.toml
+# actually uses.
+try:  # Python 3.11+
+    import tomllib as _toml
+except ModuleNotFoundError:  # pragma: no cover - depends on the interpreter
+    try:
+        import tomli as _toml  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        _toml = None  # type: ignore[assignment]
+
+
+_SECTION = re.compile(r"^\[([A-Za-z0-9_.-]+)\]$")
+_ENTRY = re.compile(r'^([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$')
+
+
+def _parse_value(raw: str, where: str):
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    if raw in ("true", "false"):
+        return raw == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    raise ValueError(f"{where}: cannot read value {raw!r}")
+
+
+def _minimal_toml(text: str, path) -> dict:
+    """Read the flat [section] key = value shape this project's config uses.
+
+    Deliberately narrow: anything outside that shape raises instead of being
+    guessed at, so a real TOML file is never silently half-read. Install `tomli`
+    or use Python 3.11+ if the config needs more than this.
+    """
+    out: dict = {}
+    section = None
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        where = f"{path}:{number}"
+        match = _SECTION.match(line)
+        if match:
+            section = out.setdefault(match.group(1), {})
+            continue
+        match = _ENTRY.match(line)
+        if not match:
+            raise ValueError(
+                f"{where}: this build reads only '[section]' and 'key = value' lines "
+                f"({line!r}). Install tomli, or run on Python 3.11+."
+            )
+        if section is None:
+            raise ValueError(f"{where}: '{match.group(1)}' is outside any [section]")
+        section[match.group(1)] = _parse_value(match.group(2), where)
+    return out
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.toml"
@@ -65,8 +127,11 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
     raw: dict = {}
     if cfg_path.exists():
-        with open(cfg_path, "rb") as fh:
-            raw = tomllib.load(fh)
+        if _toml is not None:
+            with open(cfg_path, "rb") as fh:
+                raw = _toml.load(fh)
+        else:
+            raw = _minimal_toml(cfg_path.read_text(encoding="utf-8"), cfg_path)
 
     cfg = Config(
         llm=_build(LLMConfig, _section(raw, "llm")),

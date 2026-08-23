@@ -1123,6 +1123,81 @@ def test_three_states_are_consistent() -> None:
 
 
 
+
+
+# --------------------------------- 15. runs on Pythons without tomllib
+
+def test_config_without_tomllib() -> None:
+    print("[15] config loads without tomllib")
+    import builtins
+    import importlib
+
+    import config as config_mod
+
+    # tomllib is 3.11+; tomli is optional. Neither present must still work.
+    real_import = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name in ("tomllib", "tomli"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *a, **k)
+
+    builtins.__import__ = blocked
+    try:
+        fallback = importlib.reload(config_mod)
+        assert fallback._toml is None, "the fallback path was not taken"
+        cfg = fallback.load_config()
+    finally:
+        builtins.__import__ = real_import
+        importlib.reload(config_mod)
+
+    # Values must come back with the same types the TOML parser gives.
+    assert cfg.llm.model == "qwen3.5_397b_a17b", cfg.llm.model
+    assert isinstance(cfg.llm.temperature, float) and cfg.llm.temperature == 0.2
+    assert isinstance(cfg.llm.max_tokens, int) and cfg.llm.max_tokens == 32768
+    assert isinstance(cfg.renderer.device_scale, float) and cfg.renderer.device_scale == 1.0
+    assert isinstance(cfg.renderer.width, int) and cfg.renderer.width == 800
+    assert cfg.loop.max_rounds == 8
+    ok("config.toml parses without tomllib, with the same value types")
+
+    # The narrow parser must refuse what it cannot read rather than guess.
+    from config import _minimal_toml
+
+    good = _minimal_toml('[llm]\nmodel = "x"  # 주석\ntimeout = 900\n\n', "t")
+    assert good == {"llm": {"model": "x", "timeout": 900}}, good
+    ok("comments and blank lines are handled")
+
+    for bad, why in [
+        ('model = "x"\n', "section 밖의 키"),
+        ('[llm]\nvalues = [1, 2]\n', "배열"),
+        ('[llm]\nnested = { a = 1 }\n', "인라인 테이블"),
+        ('[llm]\ngarbage\n', "값 없는 줄"),
+    ]:
+        try:
+            _minimal_toml(bad, "t")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"허용해선 안 되는 입력: {why}")
+    ok("anything outside the supported shape raises instead of being guessed")
+
+    # The path guard must not call Path.is_relative_to (3.9+); the name may
+    # still appear in a comment explaining why.
+    assert ".is_relative_to(" not in (ROOT / "ui.py").read_text()
+    ok("the UI path guard avoids a 3.9-only API")
+
+    # Every module defers annotation evaluation, so `X | Y` hints are safe on
+    # interpreters older than 3.10.
+    missing = [
+        f.name
+        for f in list(ROOT.glob("*.py")) + list((ROOT / "tests").glob("*.py"))
+        if "from __future__ import annotations" not in f.read_text()
+    ]
+    assert not missing, f"these modules would fail on older Pythons: {missing}"
+    ok("all modules defer annotations, so union hints work on older Pythons")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1142,6 +1217,7 @@ def main() -> int:
     test_verify_feeds_next_plan(llm_base, renderer_url)
     test_failed_attempts_persist(llm_base, renderer_url)
     test_three_states_are_consistent()
+    test_config_without_tomllib()
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

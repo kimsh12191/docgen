@@ -1,1 +1,4 @@
-Pillow>=10.0
+Pillow>=9.0
+# config.toml 읽기용. Python 3.11+ 는 표준 라이브러리 tomllib 를 쓰므로 필요 없다.
+# 3.11 미만에서도 없으면 내장 최소 파서로 읽으니 필수는 아니다.
+tomli>=2.0; python_version < "3.11"
