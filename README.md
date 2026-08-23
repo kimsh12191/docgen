@@ -133,10 +133,18 @@ python run.py build sample.png --ui
 로컬 주소가 출력되니 브라우저로 열어둔다. `--ui` 를 켜면 **기본적으로 사람 의견을
 받는다** (PLAN·VERIFY 양쪽). 판단 조합은 이렇게 된다.
 
-| 하는 일 | 결과 |
+PLAN과 VERIFY 각각 **세 가지**뿐이다.
+
+| | 하는 일 | PLAN | VERIFY |
+| --- | --- | --- | --- |
+| ① | Qwen 결과 그대로 | `① Qwen 계획대로` | `① Qwen 판정대로` |
+| ② | Qwen 결과 + 내 의견 | `② 참고로 첨부 (계획 유지)` | `② 참고로 첨부 (판정 유지)` |
+| ③ | Qwen 결과 버리고 내 결정 | `③ Qwen 계획 버리고 내 지시만` | `③ 내 판정: keep/revert/done` |
+
+중간 단계는 없다. ②면 Qwen 결과가 남고 ③이면 안 남는다.
+
+| 그 밖에 | 결과 |
 | --- | --- |
-| `Qwen 계획대로` / `Qwen 판정대로` | Qwen 판단만 사용 |
-| `참고로 첨부` | Qwen 판단 + 사람 참고 의견 |
 | (PLAN) `Qwen 계획 버리고 내 지시만` | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
 | 헤더의 `VERIFY 판정` / `PLAN 개입` | **실행 중에** 개입 방식을 바꾼다. 다음 라운드부터 적용 |
 | (VERIFY) `내 판정: keep/revert/done` | Qwen 판정을 읽고 사람 판정으로 교체. `verified_by: operator` |
@@ -276,20 +284,20 @@ PLAN 직후와(`--verify both` 면) VERIFY 직후에 멈춘다. `--verify` 를 �
 
 | 입력 | 결과 |
 | --- | --- |
-| Enter | 계획 그대로 수락 |
-| `a <의견>` | 첨부. `operator_note`로 들어가고 모델 계획은 그대로 남는다 |
-| `x <지시>` | 뒤집기. Qwen 계획을 버리고 그 지시가 목표가 된다. 원래 계획은 `model_plan`에 기록만 남는다 |
-| `s` | 이 라운드를 건너뛴다 |
+| Enter | ① 계획 그대로 수락 |
+| `a <의견>` | ② `operator_note`로 들어가고 Qwen 계획은 그대로 남는다 |
+| `x <지시>` | ③ Qwen 계획을 버리고 그 지시가 목표가 된다. 원래 계획은 `model_plan`에 기록만 |
+| `s` | 이 라운드를 건너뛴다 (세 가지 밖) |
 | `keep`/`revert`/`done` | VERIFY 판정어라고 알려주고 다시 묻는다 |
 
 **VERIFY** (`--verify both`)
 
 | 입력 | 결과 |
 | --- | --- |
-| Enter | Qwen 판정 수락 |
-| `a <의견>` | 첨부. 판정은 그대로 두고 `operator_note`만 붙는다 |
-| `keep`/`revert`/`done` | 뒤집기. 모델 판정은 `model_decision`에 보존된다 |
-| `revert <이유>` | 뒤집으면서 같은 줄에 이유를 붙인다 |
+| Enter | ① Qwen 판정 수락 |
+| `a <의견>` | ② 판정은 그대로 두고 `operator_note`만 붙는다 |
+| `keep`/`revert`/`done` | ③ Qwen 판정은 `model_decision`에 보존된다 |
+| `revert <이유>` | ③ 뒤집으면서 같은 줄에 이유를 붙인다 |
 
 첨부한 의견은 **다음 라운드 PLAN의 history로 실려 간다.** 판정을 바꾸지 않고
 방향만 잡아주고 싶을 때 쓰는 경로다.

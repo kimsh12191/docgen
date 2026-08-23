@@ -57,13 +57,13 @@ WebSocket이 아니라 **1초 폴링**이다. 표준 라이브러리만 쓰기�
 
 답은 항상 **짧은 문자열 하나**다.
 
-| 문자열 | 뜻 |
-| --- | --- |
-| `""` | 수락 |
-| `a <의견>` | 참고로 첨부 (모델 결과 유지) |
-| `x <지시>` | Qwen 계획 버리고 내 지시만 |
-| `s` | 라운드 건너뛰기 |
-| `keep` / `revert` / `done` `[이유]` | Qwen 판정 버리고 내 판정 |
+| 문자열 | 단계 | 세 가지 중 |
+| --- | --- | --- |
+| `""` | PLAN·VERIFY | ① Qwen 결과 그대로 |
+| `a <의견>` | PLAN·VERIFY | ② Qwen 결과 + 내 의견 |
+| `x <지시>` | PLAN | ③ Qwen 계획 버리고 내 지시만 |
+| `keep` / `revert` / `done` `[이유]` | VERIFY | ③ Qwen 판정 버리고 내 판정 |
+| `s` | PLAN | 세 가지 밖 — 라운드 취소 |
 
 **터미널에서 타이핑하는 문자열과 완전히 같다.** 그래서 답을 해석하는 코드가
 `pipeline.py` 한 곳뿐이고, UI와 터미널의 동작이 갈릴 여지가 없다.
@@ -149,6 +149,9 @@ def interactive(self) -> bool:
 | `model+operator` | Qwen 결과 유지 + 사람 참고 의견 | `operator_note` |
 | `operator` | Qwen 결과 폐기, 사람 결정 | `operator_instruction`/`operator_override` + `model_plan`/`model_decision` |
 
+화면의 버튼도 이 세 개에 ①②③ 번호가 붙어 있어서, 버튼 수(VERIFY는 판정 값을
+골라야 해서 5개)와 무관하게 선택지가 세 개라는 것이 읽힌다.
+
 이 상태는 결정하는 지점에서 `planned_by` / `verified_by` 에 **기록**되고, 읽을
 때는 항상 한 함수를 거친다.
 
@@ -163,7 +166,7 @@ deciding_words(payload, reason)    # 판정한 쪽의 이유 (버려진 쪽 것�
 별개인 4항 OR 하나, 태그와 근거를 다른 필드에서 가져오는 곳 하나 — 실제로
 발생한 잘못된 귀속 버그는 모두 그 복사본 중 하나가 다른 것과 어긋난 결과였다.
 
-`tests/test_offline.py` 의 15번 그룹이 3상태 × 두 단계를 전부 열거해서
+`tests/test_offline.py` 의 14번 그룹이 3상태 × 두 단계를 전부 열거해서
 `judged_by` · `operator` 플래그 · history 줄의 태그 · 실려 가는 근거가 서로
 일치하는지 확인한다. 상태를 늘리거나 소비자를 추가하면 이 표에 줄을 넣으면 된다.
 
