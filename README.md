@@ -69,7 +69,6 @@ python run.py build sample.png --max-rounds 4 -v
 
 # 사람이 개입하는 방식 (아래 "사람이 개입하기" 참고)
 python run.py build sample.png --note "표 정렬이 가장 중요하다"
-python run.py build sample.png --verify human
 python run.py build sample.png --interactive
 ```
 
@@ -142,7 +141,6 @@ python run.py build sample.png --ui
 | (PLAN) `Qwen 계획 버리고 내 지시만` | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
 | 헤더의 `VERIFY 판정` / `PLAN 개입` | **실행 중에** 개입 방식을 바꾼다. 다음 라운드부터 적용 |
 | (VERIFY) `내 판정: keep/revert/done` | Qwen 판정을 읽고 사람 판정으로 교체. `verified_by: operator` |
-| `--verify human` | VERIFY에 Qwen을 아예 호출하지 않는다 |
 
 어느 쪽이든 **Qwen이 뭐라고 했는지 화면에서 먼저 본 다음** 고를 수 있다.
 `--verify` 는 시작값일 뿐이고, 화면 오른쪽 위에서 실행 중에 바꿀 수 있다 —
@@ -248,19 +246,7 @@ python run.py build sample.png --notes-file notes.txt
 ```bash
 python run.py build sample.png --verify model   # 기본. 모델만 판정
 python run.py build sample.png --verify both    # 모델이 판정하고 사람이 뒤집을 수 있다
-python run.py build sample.png --verify human   # 모델 호출 없이 사람이 판정
-```
-
-`--verify human` 은 VERIFY LLM 호출을 **아예 하지 않는다.** 라운드마다
-`rounds/rNN/compare.png` 를 보고 사람이 직접 판정한다.
-
-```
---- VERIFY (사람 판정) ---
-비교 이미지: out/sample/rounds/r01/compare.png
-이번 라운드 목표: 표 컬럼 폭을 원본에 맞춘다
-판정 (keep=반영 / revert=되돌림 / done=완료): keep
-이유 (선택, Enter=생략): 제목 크기가 원본과 맞았다
-다음에 고칠 것 (선택, Enter=생략): 표 우측 정렬이 아직 다르다
+   # 모델 호출 없이 사람이 판정
 ```
 
 `compare.png` 는 **원본 · 수정 전 · 수정 후**를 한 장에 나란히 붙인 이미지다.
@@ -271,9 +257,7 @@ python run.py build sample.png --verify human   # 모델 호출 없이 사람이
 "다음에 고칠 것"에 적은 내용은 **다음 라운드 PLAN의 history에 실려 들어간다.**
 사람의 판단이 다음 계획에 반영되는 경로다.
 
-`--verify human` 인데 터미널이 아니면 **에러로 종료한다.** 판정을 줄 다른
-경로가 없어서 다운그레이드가 불가능하다. `--verify both` 는 같은 상황에서
-`model` 로 내려간다.
+`--verify both` 인데 터미널도 UI도 없으면 `model` 로 내려간다.
 
 ### 대화형 — 뒤집기와 첨부
 
@@ -397,7 +381,7 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `errors` | LLM 호출 자체가 실패한 라운드 수 |
 | `mode` | 그 라운드가 `patch`였는지 `rewrite`였는지 |
 | `thinking_control` | `false`면 서버가 `chat_template_kwargs`를 거부해 stage별 thinking 제어 없이 돌았다는 뜻 |
-| `verify_mode` | 시작할 때의 VERIFY 방식: `model` / `both` / `human` |
+| `verify_mode` | 시작할 때의 VERIFY 개입 여부: `model`(안 물음) / `both`(물음) |
 | `verify_mode_final` | 끝날 때의 방식. 다르면 실행 중에 바꾼 것이다 |
 | `operator_interventions` | 사람이 PLAN에 지시를 넣거나, VERIFY 판정을 뒤집거나, 직접 판정한 횟수. `0`이면 모델 단독 실행 |
 | `operator_rounds` | 사람 개입이 있었던 라운드 수 |
@@ -459,7 +443,7 @@ Already tried without success:
 | `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. 이 값은 다음 라운드 PLAN에 전달되므로, 계속 같은 값이면 PLAN이 그걸 못 고치고 있다는 뜻이다. |
 | `thinking_control`이 `false` | 서버가 해당 파라미터를 안 받는다. 동작은 하지만 PLAN·VERIFY가 thinking 없이 판단하므로 품질이 떨어질 수 있다. |
 | `errors`가 있다 | LLM 호출 실패다. `run.log`에 재시도 내역과 HTTP 응답이 남는다. |
-| `kept`만 쌓이는데 `compare.png`는 나아지지 않는다 | VERIFY가 자기 수정에 관대한 경우다. `--verify both`로 뒤집어 보거나 `--verify human`으로 사람이 판정한다. |
+| `kept`만 쌓이는데 `compare.png`는 나아지지 않는다 | VERIFY가 자기 수정에 관대한 경우다. `--ui` 로 Qwen 판정을 보면서 사람이 갈아치운다. |
 | `done`이 너무 일찍 나온다 | VERIFY가 "거의 같다"를 느슨하게 본다. 위와 같은 대응. `final_verify.json`의 `reason`을 먼저 읽어 근거를 확인한다. |
 | PLAN이 매 라운드 같은 것만 집는다 | `--note`로 이 문서에서 중요한 것을 알려주거나, `--interactive`로 그 라운드에 직접 지시한다. |
 
@@ -524,7 +508,7 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 | BOOTSTRAP | off |
 | PLAN | on |
 | ACTION (patch·rewrite 모두) | off |
-| VERIFY | on (`--verify human` 이면 호출 자체가 없다) |
+| VERIFY | on |
 
 서버가 이 key 때문에 HTTP 400을 반환하면 client가 key를 제거하고 한 번
 재시도하며, 경고를 명확히 로그에 남긴 뒤 이후로는 서버 기본값을 따른다. 이
@@ -555,7 +539,7 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
 * renderer `/probe` 계약 위반 감지, `ok:false`가 예외를 던지는지
 * `chat_template_kwargs` 400 fallback (`retries=1` 포함)
 * 사람 개입 — 메모 주입, PLAN 첨부/교체/버리기, VERIFY 오버라이드/첨부,
-  `--verify human`, 개입 기록의 정합성(개입 횟수와 라운드 플래그가 일치하는지)
+  개입 기록의 정합성(개입 횟수와 라운드 플래그가 일치하는지)
 * 검토 UI — 패널 좌표 계산, 출력 디렉터리 밖 파일·PNG 아닌 파일 거부, 질문
   게시부터 답 수신까지 HTTP 왕복, 범위를 벗어난 영역 좌표 폐기, 실행 중 설정
   전환이 다음 라운드에 반영되는지, `0.0.0.0` 바인딩이 접속 가능한 주소를

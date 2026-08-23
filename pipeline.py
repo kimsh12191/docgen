@@ -66,7 +66,7 @@ def deciding_words(payload: dict | None, model_reason: str) -> str:
     payload = payload or {}
     reason = " ".join(str(model_reason or "").split())
     if reason == "operator verdict":
-        reason = ""  # placeholder human_verify writes when the field is skipped
+        reason = ""  # placeholder for a verdict recorded without a reason
     if judged_by(payload) == OPERATOR:
         return str(payload.get("operator_note", "")).strip() or reason
     return reason
@@ -165,8 +165,8 @@ class Pipeline:
         # caller names a mode. Keeps the library and the CLI in agreement.
         if verify_mode is None:
             verify_mode = "both" if interactive else "model"
-        if verify_mode not in ("model", "human", "both"):
-            raise ValueError(f"verify_mode must be model/human/both, got {verify_mode!r}")
+        if verify_mode not in ("model", "both"):
+            raise ValueError(f"verify_mode must be model or both, got {verify_mode!r}")
         self.cfg = cfg
         self.notes = (notes or "").strip()
         # What the run was started with. The UI may override these mid-run, so
@@ -401,7 +401,7 @@ class Pipeline:
     # -------------------------------------------------------- operator input
 
     def _input(self, prompt: str, context: dict | None = None) -> str:
-        """Always reads. Used where a human verdict is the only source of truth."""
+        """Always reads, regardless of the interactive flag."""
         self._last_region = None
         if self.prompter is not None:
             text = self.prompter.ask(prompt, context or {})
@@ -580,74 +580,6 @@ class Pipeline:
                 print("입력을 이해하지 못했습니다. 모델 판정을 그대로 둡니다.")
         return verdict
 
-    def human_verify(
-        self,
-        plan: dict,
-        compare_path: Path,
-        round_index=None,
-        panels=None,
-        region_compare=None,
-    ) -> dict:
-        """The operator is the verifier: no VERIFY call is made to the model."""
-        print("\n--- VERIFY (사람 판정) ---")
-        print(f"비교 이미지: {compare_path}")
-        goal = plan.get("goal", "") or plan.get("target", "")
-        print(f"이번 라운드 목표: {goal}")
-
-        base = {
-            "stage": "VERIFY",
-            "round": round_index if round_index is not None else "",
-            "image": str(compare_path),
-            "image_panels": panels or [],
-            "image2": str(region_compare) if region_compare else None,
-            "image2_label": "지정한 영역 (수정 전 → 후)",
-            "data": {"goal": goal, "plan": plan},
-        }
-        decision = ""
-        for _ in range(3):
-            answer = self._input(
-                "판정 (keep=반영 / revert=되돌림 / done=완료): ",
-                dict(
-                    base,
-                    title=f"VERIFY (사람 판정) — 라운드 {base['round']}",
-                    text=False,
-                    choices=[
-                        {"label": "keep (반영)", "value": "keep", "style": "primary"},
-                        {"label": "revert (되돌림)", "value": "revert", "style": "warn"},
-                        {"label": "done (완료)", "value": "done"},
-                    ],
-                ),
-            ).lower()
-            if answer in ("keep", "revert", "done"):
-                decision = answer
-                break
-            print("keep / revert / done 중 하나를 입력하세요.")
-        if not decision:
-            # Never adopt an unjudged edit.
-            LOG.warning("VERIFY: no usable operator verdict; defaulting to revert")
-            decision = "revert"
-
-        reason = self._input(
-            "이유 (선택, Enter=생략): ",
-            dict(base, title="이유 (선택)", text=True, enter_value="@text",
-                 choices=[{"label": "생략", "value": ""},
-                          {"label": "입력한 이유 전송", "value": "@text", "style": "primary"}]),
-        )
-        next_issue = self._input(
-            "다음에 고칠 것 (선택, Enter=생략): ",
-            dict(base, title="다음에 고칠 것 (선택)", text=True, enter_value="@text",
-                 choices=[{"label": "생략", "value": ""},
-                          {"label": "입력한 내용 전송", "value": "@text", "style": "primary"}]),
-        )
-        self.interventions += 1
-        LOG.info("VERIFY: operator decided %s", decision)
-        return {
-            "decision": decision,
-            "reason": reason or "operator verdict",
-            "next_major_issue": next_issue,
-            "verified_by": OPERATOR,
-        }
-
     # ------------------------------------------------------------------ loop
 
     def build(self, source: str | Path) -> dict:
@@ -784,28 +716,19 @@ class Pipeline:
 
             # VERIFY
             try:
-                if self.verify_mode == "human":
-                    verdict = self.human_verify(
-                        plan,
-                        compare_path,
-                        round_index=index,
-                        panels=compare_panels,
-                        region_compare=region_compare,
+                verdict = self.verify(plan, source_png, current_png, candidate_png)
+                verdict["verified_by"] = MODEL
+                if self.verify_mode == "both":
+                    verdict = self.review_verify(
+                        verdict,
+                        {
+                            "round": index,
+                            "image": str(compare_path),
+                            "image_panels": compare_panels,
+                            "image2": str(region_compare) if region_compare else None,
+                            "image2_label": "지정한 영역 (수정 전 → 후)",
+                        },
                     )
-                else:
-                    verdict = self.verify(plan, source_png, current_png, candidate_png)
-                    verdict["verified_by"] = MODEL
-                    if self.verify_mode == "both":
-                        verdict = self.review_verify(
-                            verdict,
-                            {
-                                "round": index,
-                                "image": str(compare_path),
-                                "image_panels": compare_panels,
-                                "image2": str(region_compare) if region_compare else None,
-                                "image2_label": "지정한 영역 (수정 전 → 후)",
-                            },
-                        )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
                 record(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=touched_by_operator(plan)))

@@ -68,7 +68,7 @@ PAGE = """<!doctype html>
 </style>
 <header><b>docgen review</b><span id="sub">connecting...</span>
   <div class="ctl">
-    <span><b>VERIFY 판정</b><span id="vm"></span></span>
+    <span><b>VERIFY 개입</b><span id="vm"></span></span>
     <span><b>PLAN 개입</b><span id="pi"></span></span>
   </div>
 </header>
@@ -99,11 +99,9 @@ function send(value){
 }
 
 // --- 실행 중에 바꿀 수 있는 설정 -------------------------------------------
-const VERIFY_MODES = [
-  ['model', 'Qwen에 맡김'],
-  ['both',  'Qwen 판정 보고 내가 결정'],
-  ['human', 'Qwen 안 부르고 나만'],
-];
+// Two symmetric switches: be asked at PLAN, be asked at VERIFY. Qwen answers
+// both stages either way; these only decide whether the loop stops for you.
+const VERIFY_MODES = [[ 'both', '멈추고 묻기'], ['model', '묻지 않기']];
 const PLAN_MODES = [[true, '멈추고 묻기'], [false, '묻지 않기']];
 
 function setConfig(patch){
@@ -422,9 +420,10 @@ class ReviewServer:
         if not isinstance(patch, dict):
             return
         mode = patch.get("verify_mode")
-        if mode in ("model", "both", "human"):
+        if mode in ("model", "both"):
             self.verify_mode_override = mode
-            LOG.info("UI: VERIFY 판정 주체를 %s 로 바꿨습니다", mode)
+            LOG.info("UI: VERIFY 개입을 %s 로 바꿨습니다",
+                     "멈추고 묻기" if mode == "both" else "묻지 않기")
         if "plan_interactive" in patch:
             self.plan_interactive_override = bool(patch["plan_interactive"])
             LOG.info("UI: PLAN 개입을 %s 로 바꿨습니다",

@@ -198,7 +198,7 @@ path, panels = side_by_side([("1. SOURCE", src), ("2. CURRENT RENDER", png)], ou
 | --- | --- | --- |
 | 경로 탈출 | resolve 후 출력 디렉터리 내부 + `.png` 확장자만 | `ReviewServer.read_image` |
 | 잘못된 좌표 | 범위·부호 검증, 실패 시 폐기 | `ReviewServer._clean_region` |
-| 답이 안 옴 | 타임아웃 후 입력 없음. 사람 단독 판정이면 `revert` | `ask` / `human_verify` |
+| 답이 안 옴 | 타임아웃 후 입력 없음으로 처리 → Qwen 판정이 그대로 선다 | `ReviewServer.ask` |
 | 인증 없음 | 기본 localhost 바인딩, 열 때 경고 출력 | `run.py` |
 | UI 없이 실행 | `prompter=None` → 완전히 동일 동작 | `Pipeline._input` |
 
@@ -209,7 +209,7 @@ path, panels = side_by_side([("1. SOURCE", src), ("2. CURRENT RENDER", png)], ou
 | 파일 | 역할 |
 | --- | --- |
 | `ui.py` | `ReviewServer`, HTTP 핸들러, 페이지 한 덩어리 |
-| `pipeline.py` | `review_plan` / `review_verify` / `human_verify` 가 `choices` 를 선언하고 답을 해석 |
+| `pipeline.py` | `review_plan` / `review_verify` 가 `choices` 를 선언하고 답을 해석 |
 | `utils.py` | `side_by_side` (패널 박스 포함), `crop_normalized` |
 | `run.py` | `--ui`, `--ui-host`, `--ui-port`, `--ui-timeout` |
 | `prompts.py` | 사람 개입이 있는 실행에 붙는 계약 블록, 영역 설명 블록, history·실패목록 블록 |

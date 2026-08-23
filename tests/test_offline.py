@@ -531,7 +531,7 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     auto = Pipeline(cfg, ROOT / "out" / "op_probe")
     assert auto.operator_active is False
     assert Pipeline(cfg, ROOT / "out" / "op_probe", interactive=True).operator_active
-    assert Pipeline(cfg, ROOT / "out" / "op_probe", verify_mode="human").operator_active
+    assert Pipeline(cfg, ROOT / "out" / "op_probe", verify_mode="both").operator_active
     ok("contract is off for a model-only run, on when a human can intervene")
 
     seen2: list[str] = []
@@ -571,77 +571,10 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
 
 
 
-# ------------------------------------------------------ 10. human as verifier
-
-def test_human_verify(llm_base: str, renderer_url: str) -> None:
-    print("[10] --verify human")
-    import shutil
-
-    from pipeline import Pipeline
-
-    cfg = load_config()
-    cfg.llm.base_url = llm_base
-    cfg.llm.timeout = 30
-    cfg.renderer.url = renderer_url
-    cfg.renderer.timeout = 30
-    cfg.loop.max_rounds = 1
-
-    mock_services.LLMHandler.plan_calls = 0
-    out = ROOT / "out" / "human_verify"
-    if out.exists():
-        shutil.rmtree(out)
-
-    pipe = Pipeline(cfg, out, verify_mode="human")
-    # Count the stages the model is actually asked for.
-    stages: list[str] = []
-    original = pipe.llm.chat
-    pipe.llm.chat = lambda messages, **kw: (stages.append(kw.get("stage", "?")), original(messages, **kw))[1]
-    answers = iter(["keep", "제목 크기가 맞았다", "표 우측 정렬이 남았다"])
-    pipe._input = lambda *_a, **_k: next(answers, "")
-
-    summary = pipe.build(make_source_png(Path("tmp/source_fixture.png")))
-
-    assert not any(st.startswith("verify") for st in stages), stages
-    assert "plan" in stages and any(st.startswith("action") for st in stages), stages
-    ok(f"no VERIFY call to the model; stages used were {stages}")
-
-    verdict = json.loads((out / "rounds" / "r01" / "verify.json").read_text())
-    assert verdict["decision"] == "keep", verdict
-    assert verdict["verified_by"] == "operator", verdict
-    assert verdict["reason"] == "제목 크기가 맞았다", verdict
-    assert verdict["next_major_issue"] == "표 우측 정렬이 남았다", verdict
-    ok("operator verdict recorded with verified_by=operator")
-
-    assert (out / "rounds" / "r01" / "compare.png").exists()
-    w, h = utils.image_size(out / "rounds" / "r01" / "compare.png")
-    assert w > 2000, (w, h)  # three panels side by side
-    ok(f"compare.png written for the operator to judge from ({w}x{h})")
-
-    assert summary["verify_mode"] == "human"
-    assert summary["rounds"][0]["operator"] is True
-    assert summary["operator_interventions"] == 1
-    ok("summary records verify_mode=human and flags the round as operator-touched")
-
-    # An unusable verdict must never adopt the edit.
-    pipe2 = Pipeline(cfg, out, verify_mode="human")
-    pipe2._input = lambda *_a, **_k: ""
-    v = pipe2.human_verify({"goal": "g"}, out / "rounds" / "r01" / "compare.png")
-    assert v["decision"] == "revert", v
-    ok("no usable operator input defaults to revert, never keep")
-
-    # The operator's comment reaches the following PLAN through history.
-    block = prompts.history_block(["Round 1: g -> keep (operator: 표 우측 정렬이 남았다)"])
-    assert "표 우측 정렬이 남았다" in block
-    ok("operator's comment is carried into the next PLAN's history")
-
-
-
-
-
-# ------------------------------------------------- 11. UI and region marking
+# ------------------------------------------------- 10. UI and region marking
 
 def test_ui_and_region() -> None:
-    print("[11] review UI and region marking")
+    print("[10] review UI and region marking")
     import urllib.error
     import urllib.request
 
@@ -744,10 +677,10 @@ def test_ui_and_region() -> None:
 
 
 
-# ------------------------- 12. operator-only plan, LAN binding, region round-trip
+# ------------------------- 11. operator-only plan, LAN binding, region round-trip
 
 def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None:
-    print("[12] operator-only plan, LAN binding, region round trip")
+    print("[11] operator-only plan, LAN binding, region round trip")
     import shutil
 
     from pipeline import Pipeline
@@ -786,8 +719,10 @@ def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None
     assert srv.config() == {"verify_mode": "both", "plan_interactive": True}, srv.config()
     assert (live.interactive, live.verify_mode) == (True, "both")
 
-    srv.set_config({"verify_mode": "human"})
-    assert live.verify_mode == "human", live.verify_mode
+    srv.set_config({"verify_mode": "model"})
+    assert live.verify_mode == "model", live.verify_mode
+    srv.set_config({"verify_mode": "both"})
+    assert live.verify_mode == "both", live.verify_mode
     srv.set_config({"plan_interactive": False})
     assert live.interactive is False
     ok("a mode change in the UI reaches the next round of the running pipeline")
@@ -876,10 +811,10 @@ def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None
 
 
 
-# ------------------------------ 13. VERIFY reasoning reaches the next PLAN
+# ------------------------------ 12. VERIFY reasoning reaches the next PLAN
 
 def test_verify_feeds_next_plan(llm_base: str, renderer_url: str) -> None:
-    print("[13] VERIFY reasoning reaches the next PLAN")
+    print("[12] VERIFY reasoning reaches the next PLAN")
     import shutil
 
     from pipeline import Pipeline, RoundResult
@@ -992,10 +927,10 @@ def test_verify_feeds_next_plan(llm_base: str, renderer_url: str) -> None:
 
 
 
-# --------------------- 14. failed attempts persist beyond the history window
+# --------------------- 13. failed attempts persist beyond the history window
 
 def test_failed_attempts_persist(llm_base: str, renderer_url: str) -> None:
-    print("[14] failed attempts outlive the 3-round history window")
+    print("[13] failed attempts outlive the 3-round history window")
     import shutil
 
     from pipeline import Pipeline, RoundResult
@@ -1089,7 +1024,7 @@ def test_failed_attempts_persist(llm_base: str, renderer_url: str) -> None:
 
 
 
-# ------------- 15. the three operator states agree everywhere they are read
+# ------------- 14. the three operator states agree everywhere they are read
 
 def test_three_states_are_consistent() -> None:
     """The whole operator model is three states. Every consumer must agree.
@@ -1098,7 +1033,7 @@ def test_three_states_are_consistent() -> None:
     eight places from combinations of optional fields, and each mis-attribution
     bug was one of those copies disagreeing with the others.
     """
-    print("[15] the three operator states agree in every consumer")
+    print("[14] the three operator states agree in every consumer")
     from pipeline import (
         MODEL,
         MODEL_AND_OPERATOR,
@@ -1195,7 +1130,6 @@ def main() -> int:
     test_patch_mode()
     test_patch_artifacts()
     test_operator(llm_base, renderer_url)
-    test_human_verify(llm_base, renderer_url)
     test_ui_and_region()
     test_operator_only_and_region_loop(llm_base, renderer_url)
     test_verify_feeds_next_plan(llm_base, renderer_url)

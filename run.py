@@ -183,11 +183,6 @@ def cmd_build(args, cfg) -> int:
             verify_mode = "both"
         tty = True  # the browser supplies the input, not the terminal
 
-    if verify_mode == "human" and not tty:
-        # There is no other source of a verdict, so this cannot be downgraded.
-        print("오류: --verify human 은 사람 입력이 필요합니다. "
-              "터미널에서 실행하거나 --ui 를 쓰세요", file=sys.stderr)
-        return 1
     if interactive and not tty:
         # A blocked input() in a batch run would hang the whole build.
         print("경고: 대화형 입력을 받을 수 없는 환경이라 --interactive 를 끕니다",
@@ -199,11 +194,8 @@ def cmd_build(args, cfg) -> int:
         print(f"운영자 메모 {len(notes)}자를 PLAN/VERIFY 프롬프트에 넣습니다")
     if interactive:
         print("대화형 모드: 매 라운드 PLAN에서 지시를 덧붙일 수 있습니다")
-    if verify_mode == "human":
-        print("VERIFY: 모델을 호출하지 않고 사람이 판정합니다 "
-              "(각 라운드 rounds/rNN/compare.png 를 보고 입력)")
-    elif verify_mode == "both":
-        print("VERIFY: 모델이 판정하고 사람이 뒤집을 수 있습니다")
+    if verify_mode == "both":
+        print("VERIFY: Qwen 판정을 보고 사람이 갈아치울 수 있습니다")
 
     # The renderer is a hard dependency of the loop: do not start without it.
     renderer = RendererClient(
@@ -327,11 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument(
         "--verify",
-        choices=("model", "human", "both"),
+        choices=("model", "both"),
         help=(
-            "VERIFY를 누가 하는가. model=모델만(기본), "
-            "human=모델 호출 없이 사람이 compare.png 보고 판정, "
-            "both=모델이 판정하고 사람이 뒤집을 수 있음"
+            "VERIFY에서 사람에게 물을지. model=묻지 않음(기본), "
+            "both=Qwen 판정을 보여주고 사람이 갈아치울 수 있음"
         ),
     )
     build.set_defaults(func=cmd_build)
