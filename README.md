@@ -63,6 +63,13 @@ CV 파이프라인, heuristic rule 모음, 구조물별 action 타입은 없다.
 비용: LLM 호출이 `1 + 1 + (0~1) + 블록 수`, 렌더가 `1 + 블록 수` 늘어난다.
 싸게 돌리려면 `--bootstrap single` 로 예전 1회 호출 방식으로 되돌린다.
 
+**이 단계 분할은 첫 HTML 생성만 바꾼다.** PLAN / ACTION / APPLY / VERIFY 는 손대지
+않았고, 시작 HTML이 같으면 두 방식의 라운드 결과는 라운드별로 동일하다(검사
+20번이 그걸 확인한다). 루프 밖으로 나가는 것은 하나뿐이다 — 골격이 붙인
+`data-block` / `data-role` 속성이 `clone.html` 까지 남는다. 렌더에는 보이지 않고
+section 모드의 앵커로 계속 쓰이므로 일부러 지우지 않는다. 최종 HTML에서 빼고
+싶으면 마지막에 그 두 속성만 제거하면 된다.
+
 ## ACTION의 세 가지 모드
 
 PLAN이 이미 내놓는 `scope`가 그대로 모드 스위치다. 별도 taxonomy는 없다.
@@ -555,7 +562,7 @@ Already tried without success:
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 127개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 132개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
@@ -654,8 +661,8 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 127개가
-19개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 132개가
+20개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -695,6 +702,9 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   찾는지, 중복 id·마커 유실·같은 태그 중첩을 거부하는지, 블록 하나가 실패해도
   나머지가 채워지는지, 레이아웃 불일치가 글자를 채우기 전에 고쳐지는지,
   `--bootstrap single` 이 예전 1회 호출로 되돌아가는지
+* bootstrap과 루프의 경계 — 시작 HTML을 고정하면 `staged` 든 `single` 이든 라운드별
+  결정·모드·변경 줄 수가 같고 `clone.html` 이 바이트 단위로 같은지, 루프의 네 단계가
+  bootstrap 설정을 아예 읽지 않는지
 * section 모드 — 블록 하나가 통째로 새 markup으로 바뀌는지, `find_end` 를
   `find_start` 뒤에서만 찾는지, 없는·중복·구간이 안 닫히는·빈·안 바뀌는 section
   edit 전부 거부, scope→모드 라우팅 7가지(문서가 크면 `global` 이 `section` 으로

@@ -1687,6 +1687,88 @@ def test_staged_bootstrap(llm_base: str, renderer_url: str) -> None:
     ok("bootstrap.staged = false falls back to the single-call draft")
 
 
+# ------------- 20. the staged draft changes where the loop starts, not how it runs
+
+def test_bootstrap_does_not_touch_the_loop(llm_base: str, renderer_url: str) -> None:
+    """Same starting HTML, both strategies, identical rounds."""
+    print("\n[20] bootstrap 방식은 루프 동작을 바꾸지 않는다")
+    import shutil
+
+    from pipeline import Pipeline
+
+    # Pinning the draft is the whole trick: with the same HTML on round 1, any
+    # difference in the rounds afterwards would have to come from the loop.
+    pinned = mock_services.GOOD_HTML.format(title=28, table_width="60%", rev=0)
+
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 4
+
+    def run(name: str, staged: bool) -> dict:
+        out = ROOT / "out" / name
+        if out.exists():
+            shutil.rmtree(out)
+        cfg.bootstrap.staged = staged
+        mock_services.LLMHandler.plan_calls = 0
+        mock_services.LLMHandler.skeleton_checks = 0
+        mock_services.LLMHandler.bootstrap_html_override = pinned
+        try:
+            summary = Pipeline(cfg, out).build(make_source_png(Path("tmp/source_fixture.png")))
+        finally:
+            mock_services.LLMHandler.bootstrap_html_override = None
+            cfg.bootstrap.staged = True
+        return {"summary": summary, "out": out}
+
+    staged = run("scope_staged", True)
+    single = run("scope_single", False)
+
+    for name in ("scope_staged", "scope_single"):
+        draft = (ROOT / "out" / name / "rounds" / "bootstrap.html").read_text()
+        assert draft == pinned, f"{name} did not start from the pinned draft"
+    ok("both strategies started the loop from the identical draft")
+
+    def shape(summary: dict) -> list:
+        return [
+            (r["round"], r["decision"], r["mode"], r["scope"], r["changed_lines"], r["error"])
+            for r in summary["rounds"]
+        ]
+
+    a, b = shape(staged["summary"]), shape(single["summary"])
+    assert a == b, f"the rounds diverged:\n staged {a}\n single {b}"
+    assert len(a) == 4, a
+    ok(f"round for round identical: {[(r[0], r[1], r[2]) for r in a]}")
+
+    for key in ("stop_reason", "kept", "reverted", "rejected", "errors",
+                "kept_line_changes"):
+        assert staged["summary"][key] == single["summary"][key], key
+    ok("stop_reason and every tally match")
+
+    left = (staged["out"] / "clone.html").read_text()
+    right = (single["out"] / "clone.html").read_text()
+    assert left == right, "the same rounds produced different clone.html"
+    ok(f"clone.html is byte-identical ({len(left)} chars)")
+
+    # And the loop's own stages must not read the bootstrap settings at all.
+    import inspect
+
+    import pipeline as pipeline_mod
+
+    loop_members = [
+        pipeline_mod.Pipeline.plan, pipeline_mod.Pipeline.action,
+        pipeline_mod.Pipeline.apply, pipeline_mod.Pipeline.verify,
+        pipeline_mod.Pipeline.action_mode,
+    ]
+    for member in loop_members:
+        body = inspect.getsource(member)
+        assert "cfg.bootstrap" not in body and "bootstrap" not in body.lower(), (
+            f"{member.__name__} reads the bootstrap settings"
+        )
+    ok("PLAN / ACTION / APPLY / VERIFY never read the bootstrap settings")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1711,6 +1793,7 @@ def main() -> int:
     test_loop_makes_progress()
     test_section_mode(llm_base, renderer_url)
     test_staged_bootstrap(llm_base, renderer_url)
+    test_bootstrap_does_not_touch_the_loop(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 
