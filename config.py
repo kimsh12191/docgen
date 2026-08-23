@@ -96,6 +96,18 @@ class RendererConfig:
 
 
 @dataclass
+class BootstrapConfig:
+    #: False falls back to asking for the whole document in one call.
+    staged: bool = True
+    #: How small the source is shrunk for the structure-only steps. Detail has
+    #: to be gone for "does the overall layout match" to be answerable.
+    rough_max_side: int = 700
+    #: Upper bound on the fill phase, so a skeleton that marks fifty blocks
+    #: cannot turn into fifty LLM calls.
+    max_blocks: int = 12
+
+
+@dataclass
 class LoopConfig:
     max_rounds: int = 8
 
@@ -104,6 +116,7 @@ class LoopConfig:
 class Config:
     llm: LLMConfig
     renderer: RendererConfig
+    bootstrap: BootstrapConfig
     loop: LoopConfig
 
 
@@ -136,6 +149,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     cfg = Config(
         llm=_build(LLMConfig, _section(raw, "llm")),
         renderer=_build(RendererConfig, _section(raw, "renderer")),
+        bootstrap=_build(BootstrapConfig, _section(raw, "bootstrap")),
         loop=_build(LoopConfig, _section(raw, "loop")),
     )
 

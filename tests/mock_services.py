@@ -139,6 +139,46 @@ class RendererHandler(BaseHTTPRequestHandler):
 
 # -------------------------------------------------------------------- mock llm
 
+SKELETON_HTML = """<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>
+body {{ margin:0; background:#fff; font-family: sans-serif; }}
+.sheet {{ width:800px; box-sizing:border-box; padding:40px; background:#fff; }}
+section {{ margin:0 0 16px 0; }}
+h1 {{ font-size:{title}px; margin:0 0 8px 0; }}
+table {{ border-collapse:collapse; width:60%; }}
+td, th {{ border:1px solid #333; padding:6px 10px; font-size:13px; }}
+</style></head>
+<body>
+<div class="sheet">
+<section data-block="1" data-role="문서 상단 제목">
+  <h1>Quarterly Expense Report</h1>
+</section>
+<section data-block="2" data-role="지출 항목 표 3열">
+  <table><tr><td>item</td><td>q1</td><td>q2</td></tr></table>
+</section>
+<section data-block="3" data-role="하단 주석">
+  <p>notes</p>
+</section>
+</div>
+</body>
+</html>"""
+
+#: What the fill step returns for each block, keyed by data-block.
+FILLED_BLOCKS = {
+    "1": '<section data-block="1" data-role="문서 상단 제목">'
+         '<h1>Quarterly Expense Report</h1>'
+         '<p>Prepared for the finance committee, revision 0.</p></section>',
+    "2": '<section data-block="2" data-role="지출 항목 표 3열"><table>'
+         '<tr><th>Item</th><th>Q1</th><th>Q2</th></tr>'
+         '<tr><td>Travel</td><td>1,200</td><td>1,450</td></tr>'
+         '<tr><td>Equipment</td><td>3,400</td><td>2,900</td></tr>'
+         '<tr><td>Total</td><td>4,600</td><td>4,350</td></tr></table></section>',
+    "3": '<section data-block="3" data-role="하단 주석">'
+         '<p>Notes: figures are provisional and subject to audit.</p></section>',
+}
+
+
 GOOD_HTML = """<!doctype html>
 <html>
 <head><meta charset="utf-8"><style>
@@ -198,6 +238,15 @@ class LLMHandler(BaseHTTPRequestHandler):
     force_length_on_action = False
     bootstrap_html_override = None
     last_action_html_len = None
+    #: Set to a data-block id to make that one block's fill fail.
+    fail_fill_block = None
+    #: When set, the layout check reports a mismatch once and then matches.
+    skeleton_mismatch = False
+    skeleton_checks = 0
+    fill_calls = 0
+    #: Longest image side each stage was sent, so a test can prove the
+    #: structure-only steps really do look at a shrunk page.
+    image_sides = {}
     #: Forces every PLAN to report this scope, so a test can drive one mode.
     scope_override = None
 
@@ -228,6 +277,7 @@ class LLMHandler(BaseHTTPRequestHandler):
 
         text = ""
         n_images = 0
+        sides: list[int] = []
         for msg in req.get("messages", []):
             content = msg.get("content")
             if isinstance(content, str):
@@ -238,9 +288,14 @@ class LLMHandler(BaseHTTPRequestHandler):
                         text += part["text"] + "\n"
                     elif part.get("type") == "image_url":
                         n_images += 1
-                        assert part["image_url"]["url"].startswith("data:image/png;base64,")
+                        url = part["image_url"]["url"]
+                        assert url.startswith("data:image/png;base64,")
+                        blob = base64.b64decode(url.split(",", 1)[1])
+                        sides.append(max(Image.open(io.BytesIO(blob)).size))
 
         content, stage = self._respond(text, n_images)
+        with LLMHandler.lock:
+            LLMHandler.image_sides.setdefault(stage, []).append(max(sides) if sides else 0)
         finish = "length" if (stage == "action" and LLMHandler.force_length_on_action) else "stop"
         self._send(
             200,
@@ -261,6 +316,47 @@ class LLMHandler(BaseHTTPRequestHandler):
                 return LLMHandler.bootstrap_html_override, "bootstrap"
             body = GOOD_HTML.format(title=28, table_width="60%", rev=0)
             return "```html\n" + body + "\n```", "bootstrap"
+
+        if "Write the page\'s STRUCTURE as HTML" in text:
+            assert n_images == 1, f"skeleton must send 1 image, got {n_images}"
+            if LLMHandler.bootstrap_html_override:
+                return LLMHandler.bootstrap_html_override, "skeleton"
+            return "```html\n" + SKELETON_HTML.format(title=28) + "\n```", "skeleton"
+
+        if "Would a person say these are the same page" in text:
+            assert n_images == 2, f"layout check must send 2 images, got {n_images}"
+            with LLMHandler.lock:
+                LLMHandler.skeleton_checks += 1
+                first = LLMHandler.skeleton_checks == 1
+            if LLMHandler.skeleton_mismatch and first:
+                return json.dumps({
+                    "matches": False,
+                    "problems": ["the table has three columns, the source has four"],
+                    "goal": "give the table a fourth column",
+                }), "skeleton_check"
+            return json.dumps({"matches": True, "problems": [], "goal": ""}), "skeleton_check"
+
+        if "Fix the LAYOUT" in text:
+            assert n_images == 2, f"layout fix must send 2 images, got {n_images}"
+            # Same blocks, wider table: a layout change, still not a transcription.
+            fixed = SKELETON_HTML.format(title=32).replace("width:60%", "width:92%")
+            return "```html\n" + fixed + "\n```", "skeleton_fix"
+
+        if "Your job is ONE block of this page" in text:
+            assert n_images == 2, f"fill must send 2 images, got {n_images}"
+            with LLMHandler.lock:
+                LLMHandler.fill_calls += 1
+            # The id sits on its own line ("  block 2 - ..."); a plain search for
+            # "block " would find "ONE block of this page" first.
+            found = re.search(r"^\s*block (\S+) - ", text, re.M)
+            ident = found.group(1) if found else ""
+            if ident == LLMHandler.fail_fill_block:
+                # A block that comes back without its marker must be rejected.
+                return "```html\n<section><p>no marker</p></section>\n```", "fill"
+            body = FILLED_BLOCKS.get(ident)
+            if body is None:
+                return f'<section data-block="{ident}"><p>unknown</p></section>', "fill"
+            return "```html\n" + body + "\n```", "fill"
 
         if "Find the single most important mismatch" in text:
             assert n_images == 2, f"plan must send 2 images, got {n_images}"

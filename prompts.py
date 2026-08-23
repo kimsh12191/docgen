@@ -33,6 +33,114 @@ all the content and the correct large-scale structure so it can be refined later
 
 Return only the HTML, nothing else."""
 
+
+# --------------------------------------------------------------- staged bootstrap
+#
+# One call cannot get a dense page both structurally and typographically right,
+# and PLAN/ACTION afterwards fix one thing a round, so a bad draft is never
+# caught up with. These four prompts split the first draft into: get the layout
+# right while the detail is invisible, check that much by eye, then fill the
+# blocks in one at a time.
+
+SKELETON_SYSTEM = (
+    "You lay out document pages as HTML skeletons, structure first."
+)
+
+SKELETON_USER = """The image is a document page, shown at low resolution on purpose.
+At this size you can see the layout but not the words. That is what to build.
+
+Write the page's STRUCTURE as HTML: where the blocks sit, how big they are, how
+they are aligned, which are bordered, which are tables and how many rows and
+columns they have. Do not try to transcribe the text - a few words per block is
+enough to show what belongs there.
+
+Rules:
+- Return one complete HTML document: <!doctype html> ... </html>.
+- Everything inline. No external CSS, fonts, images or scripts.
+- Wrap the page in a single root element with class "sheet", laid out for a
+  {width}px viewport width.
+- Divide the page into its major blocks, and mark EVERY block like this:
+    <section data-block="1" data-role="short description of what goes here">
+  Number them from 1 in reading order. The description is for the next step,
+  so say what the block is ("문서 상단 제목과 문서번호", "지출 항목 표 4열").
+- NEVER put a <section> inside another <section>. Blocks are siblings, so that
+  each one's extent is unambiguous. Use div, table, p and so on inside a block.
+- Aim for {max_blocks} blocks or fewer. A block is a region a person would
+  point at, not a paragraph.
+- Real sizes and borders: this has to render to roughly the right shape.
+
+Return only the HTML, nothing else."""
+
+SKELETON_CHECK_SYSTEM = "You compare page layouts at a glance."
+
+SKELETON_CHECK_USER = """Both images are deliberately shown at low resolution.
+Image 1 is the source document. Image 2 is a render of the HTML skeleton.
+
+Ignore the text, the fonts and every small detail - at this size they are not
+the question. Judge only the large-scale layout: the number and order of blocks,
+their proportions and positions, column structure, table row and column counts,
+which regions are bordered, how much whitespace sits where.
+
+Squint at them. Would a person say these are the same page laid out the same way?
+
+Return JSON only:
+{{
+  "matches": true,
+  "problems": ["each structural difference worth fixing, largest first"],
+  "goal": "what a single corrective edit should achieve, or empty if it matches"
+}}"""
+
+SKELETON_FIX_USER = """Both images are shown at low resolution on purpose.
+Image 1 is the source document. Image 2 is a render of the HTML below.
+
+The structure does not match yet. What is wrong:
+{problems}
+
+What the fix should achieve:
+{goal}
+
+Here is the current skeleton HTML:
+```html
+{html}
+```
+
+Fix the LAYOUT. Move, resize, split, merge or add blocks as the source requires;
+change the table row and column counts if they are wrong. Do not start
+transcribing text - the next step does that.
+
+Keep every block marked as <section data-block="N" data-role="..."> and keep
+blocks as siblings, never nested. Renumber them in reading order if you add or
+remove any.
+
+Return the complete modified HTML document, and nothing else."""
+
+FILL_SYSTEM = "You fill in one block of a document recreation, exactly."
+
+FILL_USER = """Image 1 is the source document, at full resolution.
+Image 2 is the current render of the HTML below.
+
+Your job is ONE block of this page:
+  block {block_id} - {role}
+
+Here is the current HTML:
+```html
+{html}
+```
+
+Rewrite that one block so it matches the source: every word of its text, its
+real font sizes and weights, alignment, borders, padding, column widths, and
+all of its rows and cells. This is the detail pass, so be exact rather than
+conservative - inside this block, change whatever the source requires.
+
+Do not touch anything outside the block. Do not change the page's overall
+layout; if the block is in the wrong place, fill it in correctly anyway and
+leave that for later.
+
+Return the complete block element, starting with its own opening tag and ending
+with its closing tag. Keep data-block="{block_id}" on that opening tag.
+
+Return only that block's HTML, nothing else."""
+
 PLAN_SYSTEM = "You are a meticulous visual diff analyst."
 
 PLAN_USER = """You are improving an HTML recreation of a document image.

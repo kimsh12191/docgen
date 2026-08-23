@@ -16,5 +16,10 @@ device_scale = 1.0
 width = 800
 wait_ms = 400
 
+[bootstrap]
+staged = true
+rough_max_side = 700
+max_blocks = 12
+
 [loop]
 max_rounds = 8

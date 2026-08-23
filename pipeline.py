@@ -14,7 +14,10 @@ from renderer import RendererClient, RendererError
 from utils import (
     apply_edits,
     apply_section,
+    block_markers,
+    clean_fragment_output,
     diff_line_count,
+    fill_block,
     clean_html_output,
     ensure_dir,
     extract_json,
@@ -210,33 +213,246 @@ class Pipeline:
     # ------------------------------------------------------------- bootstrap
 
     def bootstrap(self, source_png: Path) -> tuple[str, bytes]:
-        """Ask the VLM for a first draft, then render it. Thinking OFF."""
-        LOG.info("BOOTSTRAP: generating initial HTML")
-        messages = [
-            system_message(prompts.BOOTSTRAP_SYSTEM),
-            user_message(
-                prompts.BOOTSTRAP_USER.format(width=self.cfg.renderer.width),
-                self._img(source_png),
-            ),
-        ]
-        resp = self.llm.chat(messages, thinking=False, stage="bootstrap")
-        write_text(self.rounds_dir / "bootstrap_raw.txt", resp.content)
+        """The first draft, and the only stage that starts from nothing.
 
+        Staged by default. One call cannot get a dense page both structurally
+        and typographically right, and the loop afterwards fixes one thing a
+        round, so a draft with the wrong layout is never caught up with.
+        """
+        if self.cfg.bootstrap.staged:
+            html, png, metrics, stages = self._bootstrap_staged(source_png)
+        else:
+            html, png, metrics = self._bootstrap_single(source_png)
+            stages = [{"step": "single", "chars": len(html)}]
+
+        write_text(self.rounds_dir / "bootstrap.html", html)
+        write_bytes(self.rounds_dir / "bootstrap.png", png)
+        write_json(self.rounds_dir / "bootstrap_metrics.json", metrics)
+        write_json(self.rounds_dir / "bootstrap_stages.json", {"stages": stages})
+        LOG.info("BOOTSTRAP: %d chars html, render %sx%s", len(html), *image_size(png))
+        return html, png
+
+    def _rough(self, path_or_bytes):
+        """The page with the detail thrown away, for the structure-only steps."""
+        return image_part(path_or_bytes, max_side=self.cfg.bootstrap.rough_max_side)
+
+    def _stage_render(self, name: str, html: str) -> tuple[bytes, dict]:
+        """Render one bootstrap stage, keeping both halves for inspection."""
+        write_text(self.rounds_dir / f"{name}.html", html)
+        png, metrics = self.render(html)
+        write_bytes(self.rounds_dir / f"{name}.png", png)
+        return png, metrics
+
+    def _whole_document(self, resp, label: str) -> str:
+        """HTML from a generation that has to be a complete, valid document."""
+        if resp.finish_reason == "length":
+            raise RuntimeError(
+                f"{label} hit max_tokens={self.cfg.llm.max_tokens}; the HTML is truncated"
+            )
         html = clean_html_output(resp.content)
         ok, reason = html_sanity_check(html)
         if not ok:
-            raise RuntimeError(f"BOOTSTRAP produced unusable HTML: {reason}")
+            raise RuntimeError(f"{label} produced unusable HTML: {reason}")
+        return html
 
-        write_text(self.rounds_dir / "bootstrap.html", html)
-        png, metrics = self.render(html)
-        write_bytes(self.rounds_dir / "bootstrap.png", png)
-        write_json(self.rounds_dir / "bootstrap_metrics.json", metrics)
-        LOG.info(
-            "BOOTSTRAP: %d chars html, render %sx%s",
-            len(html),
-            *image_size(png),
+    def _bootstrap_single(self, source_png: Path) -> tuple[str, bytes, dict]:
+        """The whole page in one call. Thinking OFF."""
+        LOG.info("BOOTSTRAP: generating initial HTML in one pass")
+        resp = self.llm.chat(
+            [
+                system_message(prompts.BOOTSTRAP_SYSTEM),
+                user_message(
+                    prompts.BOOTSTRAP_USER.format(width=self.cfg.renderer.width),
+                    self._img(source_png),
+                ),
+            ],
+            thinking=False,
+            stage="bootstrap",
         )
-        return html, png
+        write_text(self.rounds_dir / "bootstrap_raw.txt", resp.content)
+        html = self._whole_document(resp, "BOOTSTRAP")
+        png, metrics = self.render(html)
+        return html, png, metrics
+
+    # ------------------------------------------------- staged bootstrap
+
+    def _bootstrap_staged(self, source_png: Path) -> tuple[str, bytes, dict, list]:
+        """Structure first, checked by eye, then one block at a time."""
+        stages: list[dict] = []
+
+        html, png, metrics = self._skeleton(source_png, stages)
+        html, png, metrics = self._skeleton_check(source_png, html, png, metrics, stages)
+        html, png, metrics = self._fill_blocks(source_png, html, png, metrics, stages)
+        return html, png, metrics, stages
+
+    def _skeleton(self, source_png: Path, stages: list) -> tuple[str, bytes, dict]:
+        """Step 1. Layout only, from a source too small to read. Thinking OFF."""
+        bcfg = self.cfg.bootstrap
+        LOG.info("BOOTSTRAP 1/3: structure, from a %dpx view of the page", bcfg.rough_max_side)
+        resp = self.llm.chat(
+            [
+                system_message(prompts.SKELETON_SYSTEM),
+                user_message(
+                    prompts.SKELETON_USER.format(
+                        width=self.cfg.renderer.width, max_blocks=bcfg.max_blocks
+                    ),
+                    self._rough(source_png),
+                ),
+            ],
+            thinking=False,
+            stage="skeleton",
+        )
+        write_text(self.rounds_dir / "bootstrap_skeleton_raw.txt", resp.content)
+        html = self._whole_document(resp, "SKELETON")
+        png, metrics = self._stage_render("bootstrap_skeleton", html)
+        blocks = len(block_markers(html))
+        LOG.info("BOOTSTRAP: skeleton is %d chars and marks %d block(s)", len(html), blocks)
+        stages.append({"step": "skeleton", "chars": len(html), "blocks": blocks})
+        return html, png, metrics
+
+    def _skeleton_check(
+        self, source_png: Path, html: str, png: bytes, metrics: dict, stages: list
+    ) -> tuple[str, bytes, dict]:
+        """Step 2. One look at the layout, and at most one correction.
+
+        Both images go in shrunk: at that size the text is gone, which is the
+        point - "is this the same page" is answerable, "is this the same font"
+        is not, and only the first question is being asked yet.
+        """
+        LOG.info("BOOTSTRAP 2/3: comparing the layout at a glance")
+        check: dict = {}
+        try:
+            resp = self.llm.chat(
+                [
+                    system_message(prompts.SKELETON_CHECK_SYSTEM),
+                    user_message(
+                        prompts.SKELETON_CHECK_USER,
+                        self._rough(source_png),
+                        self._rough(png),
+                    ),
+                ],
+                thinking=True,
+                stage="skeleton_check",
+            )
+            check = extract_json(resp.content)
+        except (LLMError, ValueError) as exc:
+            LOG.warning("BOOTSTRAP: the layout check failed (%s); keeping the skeleton", exc)
+        write_json(self.rounds_dir / "bootstrap_skeleton_check.json", check)
+
+        problems = [str(p).strip() for p in (check.get("problems") or []) if str(p).strip()]
+        goal = str(check.get("goal", "")).strip()
+        # A check that could not be read defaults to "matches": with no problems
+        # named there is nothing to correct, and inventing one wastes a call.
+        if bool(check.get("matches", True)) or not problems:
+            LOG.info("BOOTSTRAP: the layout was judged close enough to fill in")
+            stages.append({"step": "layout_check", "matches": True, "problems": problems})
+            return html, png, metrics
+
+        LOG.info("BOOTSTRAP: correcting the layout: %s", truncate("; ".join(problems), 160))
+        stages.append({"step": "layout_check", "matches": False, "problems": problems,
+                       "goal": goal})
+        try:
+            resp = self.llm.chat(
+                [
+                    system_message(prompts.SKELETON_SYSTEM),
+                    user_message(
+                        prompts.SKELETON_FIX_USER.format(
+                            problems="\n".join(f"- {p}" for p in problems),
+                            goal=goal or "make the layout match the source",
+                            html=html,
+                        ),
+                        self._rough(source_png),
+                        self._rough(png),
+                    ),
+                ],
+                thinking=False,
+                stage="skeleton_fix",
+            )
+            fixed = self._whole_document(resp, "SKELETON FIX")
+            png, metrics = self._stage_render("bootstrap_rough", fixed)
+        except (LLMError, RendererError, RuntimeError) as exc:
+            LOG.warning("BOOTSTRAP: the layout fix did not land (%s); keeping the skeleton", exc)
+            stages.append({"step": "layout_fix", "landed": False, "error": str(exc)})
+            return html, png, metrics
+
+        blocks = len(block_markers(fixed))
+        LOG.info("BOOTSTRAP: layout corrected, %d chars, %d block(s)", len(fixed), blocks)
+        stages.append({"step": "layout_fix", "landed": True, "chars": len(fixed),
+                       "blocks": blocks})
+        return fixed, png, metrics
+
+    def _fill_blocks(
+        self, source_png: Path, html: str, png: bytes, metrics: dict, stages: list
+    ) -> tuple[str, bytes, dict]:
+        """Step 3. Detail, one marked block at a time. Thinking OFF.
+
+        Sequential rather than parallel: each block is written against a render
+        of the document as the previous blocks left it. A block that fails is
+        left as the skeleton drew it -- the PLAN/ACTION loop can still reach it.
+        """
+        markers = block_markers(html)
+        if not markers:
+            LOG.warning(
+                "BOOTSTRAP: the skeleton marked no blocks (no data-block attribute), "
+                "so there is nothing to fill; the loop starts from the skeleton"
+            )
+            stages.append({"step": "fill", "blocks": 0, "filled": 0})
+            return html, png, metrics
+
+        limit = self.cfg.bootstrap.max_blocks
+        if len(markers) > limit:
+            LOG.warning(
+                "BOOTSTRAP: the skeleton marked %d blocks, filling the first %d "
+                "(bootstrap.max_blocks); the rest stay as drawn",
+                len(markers),
+                limit,
+            )
+            markers = markers[:limit]
+
+        LOG.info("BOOTSTRAP 3/3: filling %d block(s) in reading order", len(markers))
+        filled = 0
+        for number, marker in enumerate(markers, 1):
+            label = f"block {marker['id']}" + (f" ({marker['role']})" if marker["role"] else "")
+            try:
+                resp = self.llm.chat(
+                    [
+                        system_message(prompts.FILL_SYSTEM),
+                        user_message(
+                            prompts.FILL_USER.format(
+                                block_id=marker["id"],
+                                role=marker["role"] or "this block",
+                                html=html,
+                            ),
+                            self._img(source_png),
+                            self._img(png),
+                        ),
+                    ],
+                    thinking=False,
+                    stage=f"fill:{marker['id']}",
+                )
+                if resp.finish_reason == "length":
+                    raise ValueError(
+                        f"hit max_tokens={self.cfg.llm.max_tokens}, the block is truncated"
+                    )
+                fragment = clean_fragment_output(resp.content, marker["tag"])
+                candidate, span = fill_block(html, marker, fragment)
+                ok, reason = html_sanity_check(candidate)
+                if not ok:
+                    raise ValueError(f"the document would be broken: {reason}")
+                png, metrics = self._stage_render(f"bootstrap_fill_{number:02d}", candidate)
+            except (LLMError, RendererError, ValueError) as exc:
+                LOG.warning("BOOTSTRAP: %s left as drawn: %s", label, exc)
+                stages.append({"step": "fill", "block": marker["id"], "landed": False,
+                               "error": str(exc)})
+                continue
+            html = candidate
+            filled += 1
+            LOG.info("BOOTSTRAP: %s filled (%s)", label, span)
+            stages.append({"step": "fill", "block": marker["id"], "landed": True,
+                           "role": marker["role"], "span": span})
+
+        LOG.info("BOOTSTRAP: %d of %d block(s) filled", filled, len(markers))
+        return html, png, metrics
 
     # ------------------------------------------------------------------ plan
 

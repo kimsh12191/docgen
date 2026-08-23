@@ -166,6 +166,8 @@ def cmd_build(args, cfg) -> int:
 
     if args.max_rounds:
         cfg.loop.max_rounds = args.max_rounds
+    if args.bootstrap:
+        cfg.bootstrap.staged = args.bootstrap == "staged"
 
     try:
         notes = _operator_notes(args)
@@ -297,6 +299,13 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("source", help="입력 문서 PNG")
     build.add_argument("-o", "--output", help="출력 디렉터리 (기본값 out/<이름>)")
     build.add_argument("--max-rounds", type=int, help="최대 라운드 수 (기본값은 config)")
+    build.add_argument(
+        "--bootstrap",
+        choices=("staged", "single"),
+        default=None,
+        help=("첫 HTML 생성 방식. staged=구조 → 육안 대조 → 블록별 채우기(기본), "
+              "single=한 번의 호출로 전체 생성. 기본값은 config의 bootstrap.staged"),
+    )
     build.add_argument(
         "--note",
         action="append",

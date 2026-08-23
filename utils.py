@@ -270,6 +270,20 @@ def clean_html_output(text: str) -> str:
     return html.strip()
 
 
+def clean_fragment_output(text: str, tag: str) -> str:
+    """Model output -> one HTML element. Unlike a full document there is no
+    doctype to cut to, so the element's own tag is the anchor."""
+    body = strip_code_fences(strip_think(text)).strip()
+    start = body.find(f"<{tag}")
+    if start > 0:
+        body = body[start:]
+    close = f"</{tag}>"
+    end = body.rfind(close)
+    if end != -1:
+        body = body[: end + len(close)]
+    return body.strip()
+
+
 def html_sanity_check(html: str, min_length: int = 200) -> tuple[bool, str]:
     """Minimal structural check from the spec: has a root tag, non-empty, not tiny."""
     if not html or not html.strip():
@@ -324,6 +338,67 @@ def apply_section(html: str, edit) -> tuple[str, str]:
     if section == replace:
         raise ValueError("section edit asks for no change")
     return html[:begin] + replace + html[stop:], f"{len(section)} -> {len(replace)} chars"
+
+
+_BLOCK_TAG = re.compile(r'<([a-zA-Z][\w-]*)\b[^>]*\bdata-block="([^"]*)"[^>]*>')
+_BLOCK_ROLE = re.compile(r'\bdata-role="([^"]*)"')
+
+
+def block_markers(html: str) -> list[dict]:
+    """The blocks a skeleton marked for the fill phase, in document order.
+
+    Reads an attribute this project asked the model to emit; it is not an HTML
+    parser and does not try to be. A repeated id is dropped rather than filled
+    twice, because the opening tag would no longer identify one block.
+    """
+    out: list[dict] = []
+    seen = set()
+    for match in _BLOCK_TAG.finditer(html):
+        tag, ident = match.group(1), match.group(2).strip()
+        if not ident or ident in seen:
+            if ident:
+                LOG.warning("skeleton reuses data-block=%r; only the first is filled", ident)
+            continue
+        seen.add(ident)
+        role = _BLOCK_ROLE.search(match.group(0))
+        out.append({
+            "id": ident,
+            "tag": tag,
+            "open": match.group(0),
+            "role": (role.group(1).strip() if role else ""),
+        })
+    return out
+
+
+def fill_block(html: str, marker: dict, replacement: str) -> tuple[str, str]:
+    """Swap one marked block for its filled-in version.
+
+    The anchors come from the marker rather than from the model, so a fill can
+    never fail by mis-copying them. What the model does have to keep is the
+    data-block attribute: without it the block disappears from the fill list and
+    from every later diagnostic.
+    """
+    open_tag, tag, ident = marker["open"], marker["tag"], marker["id"]
+    close = f"</{tag}>"
+    if f'data-block="{ident}"' not in replacement:
+        raise ValueError(f"block {ident} came back without its data-block attribute")
+
+    begin = html.find(open_tag)
+    if begin == -1:
+        raise ValueError(f"block {ident} opening tag is no longer in the document")
+    inner_start = begin + len(open_tag)
+    stop = html.find(close, inner_start)
+    if stop == -1:
+        raise ValueError(f"block {ident} is never closed by {close}")
+    # First-closing-tag-wins is only correct while blocks are siblings, which is
+    # what the skeleton prompt demands. If one nested anyway, say so instead of
+    # splicing the wrong span.
+    if f"<{tag}" in html[inner_start:stop]:
+        raise ValueError(f"block {ident} has a nested <{tag}>, so its extent is ambiguous")
+
+    return apply_section(html, {
+        "find_start": open_tag, "find_end": close, "replace": replacement,
+    })
 
 
 def diff_line_count(before: str, after: str) -> int:

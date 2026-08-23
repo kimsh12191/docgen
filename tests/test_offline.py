@@ -1543,6 +1543,150 @@ def test_section_mode(llm_base: str, renderer_url: str) -> None:
     ok("VERIFY weighs the net result instead of any single regression")
 
 
+# ------------------------ 19. the first draft is built in stages, not in one shot
+
+def test_staged_bootstrap(llm_base: str, renderer_url: str) -> None:
+    """Structure first, judged at a glance, then filled block by block."""
+    print("\n[19] 첫 HTML을 단계로 만든다")
+    import shutil
+
+    from pipeline import Pipeline
+    from utils import block_markers, fill_block
+
+    # 1. Finding the blocks a skeleton marked, whatever order the attributes
+    #    came out in, and refusing to fill an id that is not unique.
+    doc = (
+        "<body><section data-block=\"1\" data-role=\"머리글\"><p>x</p></section>"
+        "<section data-role=\"표\" data-block=\"2\"><p>y</p></section>"
+        "<section data-block=\"2\" data-role=\"중복\"><p>z</p></section></body>"
+    )
+    marks = block_markers(doc)
+    assert [m["id"] for m in marks] == ["1", "2"], marks
+    assert marks[0]["role"] == "머리글" and marks[1]["role"] == "표", marks
+    assert marks[1]["open"] == '<section data-role="표" data-block="2">', marks[1]
+    ok("blocks are found in reading order, attribute order does not matter, "
+       "a repeated id is dropped")
+
+    filled, span = fill_block(
+        doc, marks[0],
+        '<section data-block="1" data-role="머리글"><h1>제목</h1><p>부제</p></section>',
+    )
+    assert "<h1>제목</h1>" in filled and "<p>y</p>" in filled, filled
+    assert "<p>x</p>" not in filled, "the drawn block survived the fill"
+    ok(f"one block is replaced by its filled version, siblings untouched ({span})")
+
+    for label, marker, replacement in [
+        ("marker dropped", marks[0], "<section><p>no marker</p></section>"),
+        ("nested same tag", {"id": "9", "tag": "section", "role": "",
+                             "open": '<section data-block="9">'},
+         '<section data-block="9"><p>ok</p></section>'),
+    ]:
+        target = doc
+        if label == "nested same tag":
+            target = '<body><section data-block="9"><section><p>in</p></section></section></body>'
+        try:
+            fill_block(target, marker, replacement)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{label} should have been rejected")
+    ok("a fill without its data-block, or a block nested in its own tag, is rejected")
+
+    # 2. The whole staged path end to end.
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+    assert cfg.bootstrap.staged, "staged bootstrap is meant to be the default"
+
+    def run(name: str) -> tuple[dict, Path]:
+        out = ROOT / "out" / name
+        if out.exists():
+            shutil.rmtree(out)
+        mock_services.LLMHandler.plan_calls = 0
+        mock_services.LLMHandler.skeleton_checks = 0
+        mock_services.LLMHandler.fill_calls = 0
+        mock_services.LLMHandler.image_sides = {}
+        summary = Pipeline(cfg, out).build(make_source_png(Path("tmp/source_fixture.png")))
+        stages = json.loads((out / "rounds" / "bootstrap_stages.json").read_text())["stages"]
+        return {"summary": summary, "stages": stages}, out
+
+    result, out = run("staged_bootstrap")
+    steps = [st["step"] for st in result["stages"]]
+    assert steps[0] == "skeleton" and steps[1] == "layout_check", steps
+    assert steps.count("fill") == 3, steps
+    assert all(st["landed"] for st in result["stages"] if st["step"] == "fill"), result["stages"]
+    ok(f"three steps ran in order: {' -> '.join(dict.fromkeys(steps))}")
+
+    for rel in ("bootstrap_skeleton.html", "bootstrap_skeleton.png",
+                "bootstrap_skeleton_check.json", "bootstrap_fill_01.html",
+                "bootstrap_fill_03.png", "bootstrap.html", "bootstrap_stages.json"):
+        assert (out / "rounds" / rel).exists(), rel
+    ok("every stage left its HTML and its render on disk")
+
+    skeleton = (out / "rounds" / "bootstrap_skeleton.html").read_text()
+    final = (out / "rounds" / "bootstrap.html").read_text()
+    assert "<th>Item</th>" not in skeleton, "the skeleton already transcribed the table"
+    assert "<th>Item</th>" in final, "the fill phase never reached bootstrap.html"
+    assert len(final) > len(skeleton), (len(final), len(skeleton))
+    assert len(block_markers(final)) == 3, "the fills lost their block markers"
+    ok(f"skeleton {len(skeleton)} chars -> filled {len(final)} chars, markers intact")
+
+    # 3. The point of the rough view: the structure steps must not be able to
+    #    read the page, and the detail step must be able to.
+    sides = mock_services.LLMHandler.image_sides
+    rough = cfg.bootstrap.rough_max_side
+    for stage in ("skeleton", "skeleton_check"):
+        assert sides.get(stage), f"no images recorded for {stage}"
+        assert max(sides[stage]) <= rough, f"{stage} saw {max(sides[stage])}px, want <= {rough}"
+    assert max(sides["fill"]) > rough, f"fill only saw {max(sides['fill'])}px"
+    ok(f"structure steps saw <= {rough}px, the fill step saw {max(sides['fill'])}px")
+
+    # 4. A block that fails is left as drawn, and the others still fill.
+    mock_services.LLMHandler.fail_fill_block = "2"
+    try:
+        result2, out2 = run("staged_fill_fail")
+    finally:
+        mock_services.LLMHandler.fail_fill_block = None
+    fills = [st for st in result2["stages"] if st["step"] == "fill"]
+    assert [st["landed"] for st in fills] == [True, False, True], fills
+    assert "data-block" in fills[1].get("error", ""), fills[1]
+    final2 = (out2 / "rounds" / "bootstrap.html").read_text()
+    assert "<th>Item</th>" not in final2, "the failed block was filled anyway"
+    assert "Prepared for the finance committee" in final2, "block 1 did not survive"
+    okc, reason = utils.html_sanity_check(final2)
+    assert okc, reason
+    ok("a rejected fill leaves that block as drawn, the rest still land")
+
+    # 5. The layout check has to be able to change the layout.
+    mock_services.LLMHandler.skeleton_mismatch = True
+    try:
+        result3, out3 = run("staged_layout_fix")
+    finally:
+        mock_services.LLMHandler.skeleton_mismatch = False
+    check = json.loads((out3 / "rounds" / "bootstrap_skeleton_check.json").read_text())
+    assert check["matches"] is False and check["problems"], check
+    fix = [st for st in result3["stages"] if st["step"] == "layout_fix"]
+    assert fix and fix[0]["landed"], result3["stages"]
+    assert (out3 / "rounds" / "bootstrap_rough.html").exists()
+    assert "width:92%" in (out3 / "rounds" / "bootstrap.html").read_text()
+    ok("a layout mismatch is corrected before any text is filled in")
+
+    # 6. And the one-shot path still exists for cheap runs.
+    cfg.bootstrap.staged = False
+    try:
+        _, out4 = run("staged_off")
+    finally:
+        cfg.bootstrap.staged = True
+    assert (out4 / "rounds" / "bootstrap_raw.txt").exists()
+    assert not (out4 / "rounds" / "bootstrap_skeleton.html").exists()
+    stages4 = json.loads((out4 / "rounds" / "bootstrap_stages.json").read_text())["stages"]
+    assert [st["step"] for st in stages4] == ["single"], stages4
+    ok("bootstrap.staged = false falls back to the single-call draft")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1566,6 +1710,7 @@ def main() -> int:
     test_renderer_stays_external()
     test_loop_makes_progress()
     test_section_mode(llm_base, renderer_url)
+    test_staged_bootstrap(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

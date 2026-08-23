@@ -6,7 +6,15 @@
 핵심은 하나의 loop뿐이다. Qwen VLM이 실제 렌더 결과를 직접 보면서 판단한다.
 
 ```
-SOURCE PNG -> INITIAL HTML -> RENDER
+SOURCE PNG
+   |
+   +-- BOOTSTRAP (3단계) ------------------------------------------+
+   |     1. SKELETON  축소한 원본만 보고 구조만 만든다              |
+   |     2. CHECK     축소한 원본 vs 축소한 렌더, 육안 대조 + 1회 수정 |
+   |     3. FILL      표시된 블록을 하나씩 순서대로 채운다           |
+   +--------------------------------------------------------------+
+   |
+   v  INITIAL HTML -> RENDER
                                 |
         +-----------------------+
         v
@@ -24,6 +32,36 @@ SOURCE PNG -> INITIAL HTML -> RENDER
 CV 파이프라인, heuristic rule 모음, 구조물별 action 타입은 없다. VLM이 원본과
 실제 렌더를 비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로
 판정한다.
+
+## 첫 HTML은 3단계로 만든다
+
+루프는 한 라운드에 문제 하나를 고친다. 그래서 **첫 초안의 구조가 틀려 있으면
+따라잡지 못한다** — 8라운드를 다 써도 틀린 골격 위에 디테일만 얹힌다. 한 번의
+호출로 빽빽한 문서의 구조와 글자를 동시에 맞히라는 요구 자체가 무리다.
+
+그래서 bootstrap을 세 단계로 강제한다.
+
+| 단계 | 보는 것 | 하는 일 | thinking |
+| --- | --- | --- | --- |
+| 1. SKELETON | 원본을 `rough_max_side`(기본 700px)로 **축소한 이미지** | 구조만 만든다. 글자는 블록당 몇 단어면 된다. 각 블록을 `<section data-block="N" data-role="...">`로 표시한다 | OFF |
+| 2. CHECK | 축소한 원본 + 축소한 골격 렌더 | 눈을 가늘게 뜨고 "같은 페이지로 보이나"만 판정한다. 아니면 문제를 적고 **1회** 레이아웃을 고친다 | ON |
+| 3. FILL | 원래 해상도 원본 + 현재 렌더 | 표시된 블록을 **하나씩 순서대로** 채운다. 블록 안에서는 정확하게, 블록 밖은 건드리지 않는다 | OFF |
+
+**축소가 핵심이다.** 원래 크기로 보면 글자가 읽히니 모델이 글자부터 맞추려 든다.
+700px로 줄이면 글자는 사라지고 배치·비율·표의 행열 수만 남는다. 1단계와 2단계는
+그 질문에만 답할 수 있는 이미지를 받는다. 3단계는 원래 해상도를 받는다.
+
+**블록 채우기는 순차다.** 각 블록은 앞 블록들이 반영된 렌더를 보고 쓰인다.
+블록 하나가 실패하면 그 블록만 골격 상태로 남고 나머지는 계속 채워진다 —
+실패한 블록은 이후 PLAN/ACTION 루프가 잡으면 된다.
+
+앵커는 **Python이 만든다.** 모델은 `data-block` 표시만 유지하면 되고, 구간 계산은
+`data-block` 속성으로 여는 태그를 찾아 같은 태그의 첫 닫는 태그까지로 한다.
+그래서 골격 프롬프트가 `<section>` 중첩을 금지한다(중첩되면 구간이 모호해지므로
+그 블록은 채우지 않고 거부한다).
+
+비용: LLM 호출이 `1 + 1 + (0~1) + 블록 수`, 렌더가 `1 + 블록 수` 늘어난다.
+싸게 돌리려면 `--bootstrap single` 로 예전 1회 호출 방식으로 되돌린다.
 
 ## ACTION의 세 가지 모드
 
@@ -119,8 +157,14 @@ out/sample/
   summary.json        라운드별 결정 요약
   run.log
   rounds/
-    bootstrap.html  bootstrap.png
-    bootstrap_raw.txt  bootstrap_metrics.json
+    bootstrap.html  bootstrap.png          최종 초안 (3단계를 다 거친 결과)
+    bootstrap_metrics.json  bootstrap_stages.json
+    bootstrap_skeleton.html/.png            1단계: 구조만
+    bootstrap_skeleton_raw.txt
+    bootstrap_skeleton_check.json           2단계: 육안 판정과 지적 사항
+    bootstrap_rough.html/.png               2단계에서 레이아웃을 고친 경우만
+    bootstrap_fill_01.html/.png ...         3단계: 블록을 하나 채울 때마다
+    bootstrap_raw.txt                       --bootstrap single 일 때만
     r01/  plan.json  action_raw.txt  patch.json
           before.html  before.png
           candidate.html  candidate.png
@@ -136,6 +180,9 @@ out/sample/
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
 `summary.json`은 라운드별로 ACTION 모드(`mode`)와 사람 개입 여부(`operator`)를
 함께 기록한다.
+`bootstrap_stages.json`은 3단계가 각각 어떻게 됐는지 남긴다 — 골격이 블록 몇 개를
+표시했는지, 육안 대조가 뭘 지적했는지, 어느 블록이 채워지고 어느 블록이 왜
+실패했는지. **첫 초안이 이상하면 여기부터 본다.**
 
 ## 사람이 개입하기 (선택)
 
@@ -486,6 +533,7 @@ Already tried without success:
 | 증상 | 원인과 대응 |
 | --- | --- |
 | **PLAN·VERIFY를 다 거쳤는데 `clone.png`가 눈에 보이게 안 바뀐다** | `summary.json`의 `kept_line_changes`를 먼저 본다. **0에 가깝다** = 수정이 아예 안 쌓였다 → 아래 세 줄(`rejected` 많음 / `reverted` 많음 / `done` 조기 종료) 중 어느 것인지 `rounds`에서 가른다. **0은 아닌데 화면이 그대로** = 라운드마다 한 곳만 고치고 있다. `rounds[].changed_lines`가 `1`~`2`로 깔려 있으면 이 경우다. 같은 불일치가 표 10줄에 있으면 10줄을 한 라운드에 고치라고 PLAN·ACTION 프롬프트가 지시하지만, 모델이 안 따르면 `--interactive`로 "표 전체 행에 적용"처럼 직접 지시하는 게 가장 빠르다. `config.toml`의 `max_rounds`를 늘리는 건 그 다음이다. 그리고 `rounds[].mode`를 본다 — **전부 `patch`면 구조를 바꿀 수 있는 라운드가 한 번도 없었다**는 뜻이므로, PLAN이 `scope: "section"`을 내도록 `--interactive`에서 "이 표는 구조 자체가 틀렸다"처럼 지시한다. |
+| **첫 초안(`bootstrap.png`)부터 구조가 딴판이다** | `bootstrap_stages.json`을 본다. `skeleton`의 `blocks`가 `0`이면 골격이 블록 표시를 안 해서 채우기 단계를 통째로 건너뛴 것이다(로그에 경고가 찍힌다). `layout_check`의 `matches`가 `true`인데 눈으로 보면 틀렸다면 육안 대조가 관대한 경우다 — `bootstrap_skeleton.png`와 원본을 직접 비교해 본다. `fill` 항목의 `landed: false`가 많으면 그 이유(`error`)가 그대로 적혀 있다. |
 | `doctor`의 `[LLM]` 또는 `[Renderer]`가 FAIL | 서비스에 못 닿는다. 사내망·VPN·방화벽을 먼저 확인한다. 코드를 고칠 일이 아니다. |
 | `rejected`가 대부분이고 `mode`가 `rewrite` | 문서가 커서 ACTION이 `max_tokens`에 걸린다. 로그의 `finish_reason == 'length'` 로 확인된다. 문서가 60000자를 넘으면 `global` 계획은 자동으로 `section` 모드로 내려가므로(로그에 그 이유가 찍힌다) 이게 계속 보이면 문서가 그보다 작은데도 잘리는 경우다 — `max_tokens`를 올리거나 PLAN이 `section`을 내도록 유도한다. |
 | `rejected`가 대부분이고 `mode`가 `section` | 앵커 문제다. `error.json`에 `find_start`가 없었는지 여러 곳에 매칭됐는지, `find_end`가 뒤에 안 나왔는지가 그대로 찍힌다. 모델이 앵커를 그대로 베끼지 못하고 있다는 뜻이므로 `patch.json`의 `find_start`를 실제 HTML과 대조해 본다. |
@@ -507,13 +555,17 @@ Already tried without success:
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 117개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 127개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
 * **미검증(브라우저)** — 버튼 클릭과 영역 드래그는 자동 테스트에 없다.
   Playwright로 직접 띄워 확인했고, 그 과정에서 모든 버튼이 동작하지 않던 결함이
   나왔다. UI를 고치면 브라우저로 한 번 눌러보는 것이 필요하다.
+* **미검증** — Qwen이 축소된 이미지에서 골격을 제대로 뽑는지, `data-block` 표시를
+  끝까지 유지하는지, 육안 대조가 구조 차이를 실제로 잡아내는지. 단계 분할이
+  동작한다는 것은 검증됐지만, 각 단계의 품질은 실제 문서로 돌려봐야 안다.
+  `bootstrap_stages.json` 과 `bootstrap_skeleton.png` 가 그걸 그대로 보여준다.
 * **미검증** — Qwen이 `scope: "section"` 을 실제로 얼마나 내는지, 그리고 앵커 두
   개를 문서에서 그대로 베껴 오는지. section 모드가 큰 변경을 담을 수 있다는 것은
   검증됐지만, 모델이 그 모드를 고르지 않으면 루프는 다시 patch만 돌린다.
@@ -527,6 +579,14 @@ Already tried without success:
 `config.toml`에 endpoint와 loop 설정이 들어 있다. 서비스 위치만 바꿔서 실행할
 때는 환경 변수 세 개로 덮어쓸 수 있다: `DOCGEN_LLM_BASE_URL`,
 `DOCGEN_LLM_MODEL`, `DOCGEN_RENDERER_URL`.
+
+`[bootstrap]` 섹션이 첫 HTML 생성 방식을 정한다.
+
+| 키 | 기본값 | 의미 |
+| --- | --- | --- |
+| `staged` | `true` | 3단계로 만든다. `false`면 예전처럼 한 번의 호출로 전체 생성 (`--bootstrap single` 과 같다) |
+| `rough_max_side` | `700` | 구조 단계에서 원본을 이 크기로 줄인다. 글자가 읽히면 안 되므로 너무 크게 잡지 않는다 |
+| `max_blocks` | `12` | 채우기 단계의 상한. 골격이 이보다 많이 표시하면 앞에서부터 이 개수만 채우고 경고를 남긴다 |
 
 ## 파일 구성
 
@@ -594,8 +654,8 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 117개가
-18개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 127개가
+19개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -630,6 +690,11 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   집계되는지, PLAN·ACTION 프롬프트가 "불일치가 나타나는 모든 곳"을 고치라고
   지시하는지, `done` 이면서 남은 문제를 같이 적어 보낸 판정이 `keep` 으로
   내려가 루프가 계속되는지(정상 `done` 은 그대로 종료)
+* 단계별 bootstrap — 3단계가 순서대로 도는지, 구조 단계가 축소 이미지(<=700px)를
+  받고 채우기 단계가 원해상도를 받는지, 골격이 표시한 블록을 속성 순서와 무관하게
+  찾는지, 중복 id·마커 유실·같은 태그 중첩을 거부하는지, 블록 하나가 실패해도
+  나머지가 채워지는지, 레이아웃 불일치가 글자를 채우기 전에 고쳐지는지,
+  `--bootstrap single` 이 예전 1회 호출로 되돌아가는지
 * section 모드 — 블록 하나가 통째로 새 markup으로 바뀌는지, `find_end` 를
   `find_start` 뒤에서만 찾는지, 없는·중복·구간이 안 닫히는·빈·안 바뀌는 section
   edit 전부 거부, scope→모드 라우팅 7가지(문서가 크면 `global` 이 `section` 으로
