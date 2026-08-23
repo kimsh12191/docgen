@@ -10,11 +10,14 @@
 PLAN(무엇을 고칠지)과 VERIFY(고쳐졌는지) 두 단계가 같은 세 가지 선택을 준다.
 셋 다 UI 버튼이고 CLI 옵션이 아니다.
 
-| 하고 싶은 것 | PLAN 버튼 | VERIFY 버튼 |
-| --- | --- | --- |
-| Qwen 결과 그대로 | `Qwen 계획대로` | `Qwen 판정대로` |
-| Qwen 결과 + 내 의견 | `참고로 첨부 (계획 유지)` | `참고로 첨부 (판정 유지)` |
-| **Qwen 결과 버리고 내 결정** | `Qwen 계획 버리고 내 지시만` | `내 판정: keep/revert/done` |
+| # | 하고 싶은 것 | PLAN 버튼 | VERIFY 버튼 |
+| --- | --- | --- | --- |
+| 1 | Qwen 결과 그대로 | `Qwen 계획대로` | `Qwen 판정대로` |
+| 2 | Qwen 결과 + 내 의견 | `참고로 첨부 (계획 유지)` | `참고로 첨부 (판정 유지)` |
+| 3 | **Qwen 결과 버리고 내 결정** | `Qwen 계획 버리고 내 지시만` | `내 판정: keep/revert/done` |
+
+**두 단계 각각 이 세 개가 전부다.** 중간 단계는 없다 — 의견을 붙이면 Qwen 결과가
+남고, 버리면 안 남는다. 그 사이는 없다.
 
 버리면 Qwen의 원래 결과는 `model_plan` / `model_decision` 에 기록으로만 남고
 `planned_by` / `verified_by` 가 `operator` 로 찍힌다.
@@ -144,7 +147,7 @@ PLAN에서 할 수 있는 전부다 — 시나리오 C도 이 화면의 네 번�
 선택 영역: 1. SOURCE  x 9%, y 18%, 폭 82%, 높이 32%  [선택 해제]
 ```
 
-그 다음 지시를 적고 아무 버튼(참고 첨부 / 지시 우선 / 내 지시만)을 누르면 영역이 함께
+그 다음 지시를 적고 아무 버튼(참고 첨부 / 내 지시만)을 누르면 영역이 함께
 전송된다. 그 라운드에서 벌어지는 일:
 
 1. `plan.json` 에 `operator_region` (비율 좌표 0~1)이 저장된다.
@@ -234,9 +237,8 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 | 버튼 | 결과 | 남는 것 |
 | --- | --- | --- |
 | `Qwen 계획대로` | 모델 계획대로 진행 | `planned_by: model` |
-| `참고로 첨부 (계획 유지)` | 계획 유지 + 참고 의견 | `operator_note` |
-| `내 지시 우선 (계획 유지)` | 계획은 남기고 사람 지시를 우선 | `operator_instruction` |
-| `Qwen 계획 버리고 내 지시만` | 계획을 버림 | `planned_by: operator`, `model_plan` |
+| `참고로 첨부 (계획 유지)` | 계획 유지 + 참고 의견 | `planned_by: model+operator`, `operator_note` |
+| `Qwen 계획 버리고 내 지시만` | 계획을 버리고 사람 지시가 목표가 된다 | `planned_by: operator`, `operator_instruction`, `model_plan` |
 | 라운드 건너뛰기 | 이 라운드를 통째로 넘김 | `decision: skipped` |
 
 헤더의 컨트롤은 언제든 눌러 개입 방식 자체를 바꾼다

@@ -418,7 +418,7 @@ class Pipeline:
         return self._input(prompt, context)
 
     PLAN_PROMPT = (
-        "개입 (Enter=Qwen 계획대로 / a <의견>=참고로 첨부 / o <지시>=지시 우선 / "
+        "개입 (Enter=Qwen 계획대로 / a <의견>=참고로 첨부 / "
         "x <지시>=Qwen 계획 버리고 내 지시만 / s=건너뛰기): "
     )
 
@@ -444,7 +444,6 @@ class Pipeline:
             "choices": [
                 {"label": "Qwen 계획대로", "value": "", "style": "primary"},
                 {"label": "참고로 첨부 (계획 유지)", "value": "a @text"},
-                {"label": "내 지시 우선 (계획 유지)", "value": "o @text"},
                 {"label": "Qwen 계획 버리고 내 지시만", "value": "x @text"},
                 {"label": "라운드 건너뛰기", "value": "s", "style": "warn"},
             ],
@@ -464,7 +463,7 @@ class Pipeline:
                 # be injected into the plan as a nonsense instruction.
                 print(f"'{answer}' 는 VERIFY 판정어입니다. 여기는 PLAN 단계입니다.")
                 continue
-            if head in ("a", "o", "x"):
+            if head in ("a", "x"):
                 if not rest:
                     print(f"'{head}' 뒤에 내용을 함께 적어주세요.")
                     continue
@@ -491,11 +490,6 @@ class Pipeline:
                         }
                     )
                     LOG.info("PLAN: operator discarded the model plan")
-                elif head == "o":
-                    # ACTION is told this replaces the plan's own goal.
-                    plan["operator_instruction"] = rest
-                    plan["planned_by"] = MODEL_AND_OPERATOR
-                    LOG.info("PLAN: operator replaced the goal")
                 else:
                     plan["operator_note"] = rest
                     plan["planned_by"] = MODEL_AND_OPERATOR
@@ -505,7 +499,7 @@ class Pipeline:
                     LOG.info("PLAN: operator marked a region %s", self._last_region)
                 self.interventions += 1
                 return plan
-            print("a(참고 첨부) / o(지시 우선) / x(계획 버리고 내 지시만) / s(건너뛰기) 중에서 골라주세요.")
+            print("a(참고 첨부) / x(계획 버리고 내 지시만) / s(건너뛰기) 중에서 골라주세요.")
             if attempt == 2:
                 print("입력을 이해하지 못했습니다. 계획을 그대로 수락합니다.")
         return plan

@@ -429,12 +429,19 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
 
     # --- interactive PLAN: replace the goal vs attach a note
     pipe._base_interactive = True
-    pipe._ask = lambda *_a, **_k: "o 제목 크기부터 맞춰라"
+    pipe._ask = lambda *_a, **_k: "x 제목 크기부터 맞춰라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert plan["operator_instruction"] == "제목 크기부터 맞춰라", plan
+    assert plan["goal"] == "제목 크기부터 맞춰라", plan
     assert "operator_note" not in plan, plan
-    assert plan["planned_by"] == "model+operator", plan
-    ok("PLAN 'o' replaces the goal via operator_instruction")
+    assert plan["planned_by"] == "operator", plan
+    ok("PLAN 'x' makes the operator's instruction the goal")
+
+    # There is no middle ground between annotating and replacing: three only.
+    pipe._ask = lambda *_a, **_k: "o 뭔가"
+    plan = pipe.review_plan({"scope": "local", "goal": "g"})
+    assert plan["planned_by"] == "model", "an unknown key must not change the plan"
+    ok("PLAN offers exactly three choices; there is no fourth")
 
     pipe._ask = lambda *_a, **_k: "a 표 정렬도 같이 보라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
@@ -449,7 +456,7 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     ok("a bare 'a' with no text is refused rather than stored empty")
 
     # --- a VERIFY decision word typed at the PLAN prompt is caught, not injected
-    replies = iter(["revert", "o 제목부터"])
+    replies = iter(["revert", "x 제목부터"])
     pipe._ask = lambda *_a, **_k: next(replies)
     plan = pipe.review_plan({"scope": "local"})
     assert plan["operator_instruction"] == "제목부터", plan
@@ -624,7 +631,7 @@ def test_ui_and_region() -> None:
 
         req = urllib.request.Request(
             f"{url}answer",
-            data=json.dumps({"answer": "o 이 표만 고쳐라",
+            data=json.dumps({"answer": "x 이 표만 고쳐라",
                              "region": {"panel": "1. SOURCE", "x": 0.05, "y": 0.1,
                                         "w": 0.9, "h": 0.25}}).encode(),
             headers={"Content-Type": "application/json"},
@@ -632,7 +639,7 @@ def test_ui_and_region() -> None:
         )
         assert json.loads(urllib.request.urlopen(req).read())["ok"] is True
         thread.join(timeout=10)
-        assert answered["text"] == "o 이 표만 고쳐라", answered
+        assert answered["text"] == "x 이 표만 고쳐라", answered
         assert answered["region"]["w"] == 0.9, answered
         ok("answer and marked region both reach the pipeline")
 
@@ -668,7 +675,7 @@ def test_ui_and_region() -> None:
     cfg = load_config()
     pipe = Pipeline(cfg, out, interactive=True)
     pipe._last_region = region
-    pipe._ask = lambda *_a, **_k: "o 이 표만 고쳐라"
+    pipe._ask = lambda *_a, **_k: "x 이 표만 고쳐라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert plan["operator_region"] == region, plan
     ok("the region is stored on the plan, so ACTION receives it")

@@ -137,7 +137,6 @@ python run.py build sample.png --ui
 | --- | --- |
 | `Qwen 계획대로` / `Qwen 판정대로` | Qwen 판단만 사용 |
 | `참고로 첨부` | Qwen 판단 + 사람 참고 의견 |
-| (PLAN) `내 지시 우선 (계획 유지)` | Qwen 계획은 남기고 사람 지시를 우선 |
 | (PLAN) `Qwen 계획 버리고 내 지시만` | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
 | 헤더의 `VERIFY 판정` / `PLAN 개입` | **실행 중에** 개입 방식을 바꾼다. 다음 라운드부터 적용 |
 | (VERIFY) `내 판정: keep/revert/done` | Qwen 판정을 읽고 사람 판정으로 교체. `verified_by: operator` |
@@ -279,7 +278,7 @@ PLAN 직후와(`--verify both` 면) VERIFY 직후에 멈춘다. `--verify` 를 �
 | --- | --- |
 | Enter | 계획 그대로 수락 |
 | `a <의견>` | 첨부. `operator_note`로 들어가고 모델 계획은 그대로 남는다 |
-| `o <지시>` | 뒤집기. `operator_instruction`으로 들어가고 ACTION은 이것을 계획의 목표보다 우선한다 |
+| `x <지시>` | 뒤집기. Qwen 계획을 버리고 그 지시가 목표가 된다. 원래 계획은 `model_plan`에 기록만 남는다 |
 | `s` | 이 라운드를 건너뛴다 |
 | `keep`/`revert`/`done` | VERIFY 판정어라고 알려주고 다시 묻는다 |
 
