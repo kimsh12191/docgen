@@ -135,12 +135,12 @@ python run.py build sample.png --ui
 
 | 하는 일 | 결과 |
 | --- | --- |
-| 수락 | Qwen 판단만 사용 |
-| 의견 첨부 | Qwen 판단 + 사람 의견 |
-| (PLAN) 계획 교체 | Qwen 계획은 남기고 사람 지시를 우선 |
-| (PLAN) Qwen 계획 버리고 사람 의견만 | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
+| `Qwen 계획대로` / `Qwen 판정대로` | Qwen 판단만 사용 |
+| `참고로 첨부` | Qwen 판단 + 사람 참고 의견 |
+| (PLAN) `내 지시 우선 (계획 유지)` | Qwen 계획은 남기고 사람 지시를 우선 |
+| (PLAN) `Qwen 계획 버리고 내 지시만` | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
 | 헤더의 `VERIFY 판정` / `PLAN 개입` | **실행 중에** 개입 방식을 바꾼다. 다음 라운드부터 적용 |
-| (VERIFY) keep / revert / done | Qwen 판정을 사람 판정으로 교체 |
+| (VERIFY) `내 판정: keep/revert/done` | Qwen 판정을 읽고 사람 판정으로 교체. `verified_by: operator` |
 | `--verify human` | VERIFY에 Qwen을 아예 호출하지 않는다 |
 
 어느 쪽이든 **Qwen이 뭐라고 했는지 화면에서 먼저 본 다음** 고를 수 있다.
@@ -199,7 +199,7 @@ UI의 이미지 위를 **드래그하면 그 영역만 고치라고 지정**할 
 ```
 PLAN 실행 (모델)
   └ UI에 원본 | 현재 렌더 표시
-      └ 사람: 표 영역을 드래그 + "이 표만 원본에 맞춰라" + [사람 의견만]
+      └ 사람: 표 영역을 드래그 + "이 표만 원본에 맞춰라" + [Qwen 계획 버리고 내 지시만]
           └ plan.json  ← operator_instruction + operator_region(비율 좌표)
 ACTION (모델)
   └ 받는 것: 원본 전체, 현재 렌더 전체, 그리고
@@ -302,7 +302,7 @@ PLAN 직후와(`--verify both` 면) VERIFY 직후에 멈춘다. `--verify` 를 �
 
 | 입력 | 결과 |
 | --- | --- |
-| Enter | 모델 판정 수락 |
+| Enter | Qwen 판정 수락 |
 | `a <의견>` | 첨부. 판정은 그대로 두고 `operator_note`만 붙는다 |
 | `keep`/`revert`/`done` | 뒤집기. 모델 판정은 `model_decision`에 보존된다 |
 | `revert <이유>` | 뒤집으면서 같은 줄에 이유를 붙인다 |
@@ -352,7 +352,8 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 * `plan.json`의 `planned_by`: `model` / `model+operator` / `operator`(Qwen 계획을
   버린 경우, 원래 계획은 `model_plan`에 남는다), 영역을 지정했다면
   `operator_region`.
-* `verify.json`의 `verified_by`: `model` / `operator` / `model+operator`.
+* `verify.json`의 `verified_by`: `model` / `model+operator`(의견만 첨부) /
+  `operator`(사람이 판정).
 * 뒤집기와 첨부는 남는 필드로 구분된다. 뒤집기는 `operator_instruction`(PLAN)
   또는 `operator_override`(VERIFY), 첨부는 양쪽 다 `operator_note`.
 * VERIFY 판정을 뒤집으면 모델의 원래 판정이 `verify.json`의 `model_decision`에

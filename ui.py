@@ -100,9 +100,11 @@ function send(value){
 
 // --- 실행 중에 바꿀 수 있는 설정 -------------------------------------------
 const VERIFY_MODES = [
-  ['model', '모델만'], ['both', '모델 + 내가'], ['human', '나만 (모델 호출 안 함)'],
+  ['model', 'Qwen에 맡김'],
+  ['both',  'Qwen 판정 보고 내가 결정'],
+  ['human', 'Qwen 안 부르고 나만'],
 ];
-const PLAN_MODES = [[true, '받기'], [false, '안 받기']];
+const PLAN_MODES = [[true, '멈추고 묻기'], [false, '묻지 않기']];
 
 function setConfig(patch){
   fetch('config', {method:'POST', headers:{'Content-Type':'application/json'},

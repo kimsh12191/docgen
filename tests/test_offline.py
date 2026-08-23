@@ -478,7 +478,15 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     v = pipe.review_verify({"decision": "keep", "verified_by": "model"})
     assert v["decision"] == "revert" and v["model_decision"] == "keep", v
     assert v["operator_note"] == "표가 더 어긋났다", v
-    ok("VERIFY override accepts a reason on the same line")
+    # Replacing the verdict makes it the operator's, mirroring planned_by.
+    assert v["verified_by"] == "operator", v
+    ok("VERIFY override accepts a reason and records verified_by=operator")
+
+    # Augmenting leaves the verdict as the model's, with a human note attached.
+    pipe._ask = lambda *_a, **_k: "a 표 우측 정렬이 남았다"
+    va = pipe.review_verify({"decision": "keep", "verified_by": "model"})
+    assert va["decision"] == "keep" and va["verified_by"] == "model+operator", va
+    ok("augmenting keeps verified_by=model+operator, override does not")
 
     # --- interactive: overriding VERIFY, keeping the model's own verdict
     pipe._ask = lambda *_a, **_k: "revert"

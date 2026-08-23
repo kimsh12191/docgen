@@ -1,8 +1,23 @@
 # docgen 검토 UI
 
-문서 PNG를 HTML로 복원하는 루프에서 **사람이 끼어드는 화면**이다. 모델이 낸
-계획과 판정을 눈으로 보고, 그대로 둘지 · 의견을 붙일지 · 아예 사람 판단으로
-바꿀지 고른다.
+문서 PNG를 HTML로 복원하는 루프에서 **사람이 끼어드는 화면**이다.
+
+기본 흐름은 하나다.
+
+> **Qwen이 낸 결과를 화면에서 먼저 읽고, 그대로 둘지 · 참고로 의견만 붙일지 ·
+> Qwen 것을 버리고 내 결정을 쓸지 고른다.**
+
+PLAN(무엇을 고칠지)과 VERIFY(고쳐졌는지) 두 단계가 같은 세 가지 선택을 준다.
+셋 다 UI 버튼이고 CLI 옵션이 아니다.
+
+| 하고 싶은 것 | PLAN 버튼 | VERIFY 버튼 |
+| --- | --- | --- |
+| Qwen 결과 그대로 | `Qwen 계획대로` | `Qwen 판정대로` |
+| Qwen 결과 + 내 의견 | `참고로 첨부 (계획 유지)` | `참고로 첨부 (판정 유지)` |
+| **Qwen 결과 버리고 내 결정** | `Qwen 계획 버리고 내 지시만` | `내 판정: keep/revert/done` |
+
+버리면 Qwen의 원래 결과는 `model_plan` / `model_decision` 에 기록으로만 남고
+`planned_by` / `verified_by` 가 `operator` 로 찍힌다.
 
 * 실행: `python run.py build sample.png --ui`
 * 표준 라이브러리만 쓴다. 서버 프레임워크를 새로 깔지 않는다.
@@ -71,7 +86,7 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 | 입력창 + 버튼 | 개입 방법 |
 | 아래 카드 | 지난 라운드에 무엇을 보냈는지 |
 
-`계획 수락` 을 누르면 그대로 ACTION으로 넘어간다. 이 방식으로 8라운드를 돌리면
+`Qwen 계획대로` 를 누르면 그대로 ACTION으로 넘어간다. 이 방식으로 8라운드를 돌리면
 `--ui` 없이 돌린 것과 동일한 결과가 나온다. **화면을 보는 값이 여기 있다** —
 모델이 매 라운드 무엇을 보고 무엇을 고치려 하는지가 그대로 보인다.
 
@@ -80,7 +95,7 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 ## 시나리오 B — 의견 첨언
 
 모델 계획은 괜찮은데 한 가지를 덧붙이고 싶을 때. 입력창에 적고
-**`의견 첨부 (Qwen + 사람)`** 를 누른다.
+**`참고로 첨부 (계획 유지)`** 를 누른다.
 
 * 모델 계획은 그대로 남는다.
 * 적은 내용이 `plan.json` 의 `operator_note` 로 들어가고 ACTION이 함께 본다.
@@ -89,7 +104,7 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 
 ![개입 버튼](images/02-plan-intervene.png)
 
-입력창에 적고 **`의견 첨부 (Qwen + 사람)`** 를 누른다. 위 화면의 버튼 5개가
+입력창에 적고 **`참고로 첨부 (계획 유지)`** 를 누른다. 위 화면의 버튼 5개가
 PLAN에서 할 수 있는 전부다 — 시나리오 C도 이 화면의 네 번째 버튼이다.
 
 ![지난 라운드 기록](images/08-history.png)
@@ -104,7 +119,8 @@ PLAN에서 할 수 있는 전부다 — 시나리오 C도 이 화면의 네 번�
 모델이 엉뚱한 걸 집었을 때. **CLI 옵션이 아니라 PLAN 화면의 버튼이다.**
 ([시나리오 B 화면](images/02-plan-intervene.png)의 네 번째 버튼)
 
-지시를 적고 **`Qwen 계획 버리고 사람 의견만`** 을 누른다.
+**화면에서 Qwen 계획을 읽은 다음** 지시를 적고
+**`Qwen 계획 버리고 내 지시만`** 을 누른다.
 
 * 모델 계획을 **버린다.** ACTION은 사람 지시만 목표로 본다.
 * 원래 계획은 `plan.json` 의 `model_plan` 에 기록만 남는다. 프롬프트에
@@ -128,7 +144,7 @@ PLAN에서 할 수 있는 전부다 — 시나리오 C도 이 화면의 네 번�
 선택 영역: 1. SOURCE  x 9%, y 18%, 폭 82%, 높이 32%  [선택 해제]
 ```
 
-그 다음 지시를 적고 아무 버튼(첨언 / 교체 / 사람 의견만)을 누르면 영역이 함께
+그 다음 지시를 적고 아무 버튼(참고 첨부 / 지시 우선 / 내 지시만)을 누르면 영역이 함께
 전송된다. 그 라운드에서 벌어지는 일:
 
 1. `plan.json` 에 `operator_region` (비율 좌표 0~1)이 저장된다.
@@ -155,11 +171,13 @@ PLAN에서 할 수 있는 전부다 — 시나리오 C도 이 화면의 네 번�
 
 판정을 사람이 하는 방법은 두 가지다.
 
-**① 모델 판정을 보고 뒤집기** — 그냥 UI 버튼이다. VERIFY 화면의
-`keep / revert / done 으로 교체`. 모델 판정을 화면에서 먼저 읽고 바꾼다.
-모델의 원래 판정은 `model_decision` 에 남는다.
+**① Qwen 판정을 읽고 내 판정으로 갈아치우기 — 이게 기본이다.** VERIFY 화면의
+`내 판정: keep / revert / done` 버튼. Qwen이 뭐라고 판정했는지 화면에서 먼저
+보고 바꾼다. `verified_by` 가 `operator` 로 찍히고 Qwen의 원래 판정은
+`model_decision` 에 남는다. 별도 옵션이 필요 없다 — `--ui` 만 켜면 된다.
 
-**② Qwen에게 아예 묻지 않기** — 모델 호출 자체를 건너뛴다. 실행할 때 지정해도
+**② Qwen에게 아예 묻지 않기** — 모델 호출을 건너뛴다. 가장 비싼 호출(이미지
+3장 + thinking ON)이 사라지지만 **비교할 Qwen 의견도 없다.** 실행할 때 지정해도
 되고, [시나리오 F](#시나리오-f--실행-중에-개입-방식-바꾸기) 처럼 **실행 중에
 화면에서 바꿔도 된다.**
 
@@ -190,10 +208,10 @@ VERIFY 모델 호출(이미지 3장 + thinking ON)이 사라지므로 가장 비
 
 | 컨트롤 | 선택지 | 뜻 |
 | --- | --- | --- |
-| VERIFY 판정 | 모델만 | 사람에게 묻지 않고 모델 판정대로 진행 |
-| | 모델 + 내가 | 모델이 판정하고 사람이 보고 뒤집을 수 있음 |
-| | 나만 (모델 호출 안 함) | Qwen VERIFY 호출을 건너뛰고 사람만 판정 |
-| PLAN 개입 | 받기 / 안 받기 | PLAN에서 멈출지 |
+| VERIFY 판정 | `Qwen에 맡김` | 사람에게 묻지 않고 Qwen 판정대로 |
+| | `Qwen 판정 보고 내가 결정` | **기본.** Qwen이 판정하고 사람이 읽고 갈아치울 수 있음 |
+| | `Qwen 안 부르고 나만` | Qwen VERIFY 호출을 건너뛰고 사람만 판정 |
+| PLAN 개입 | `멈추고 묻기` / `묻지 않기` | PLAN에서 멈출지 |
 
 바꾸면 **다음 PLAN·VERIFY부터** 적용된다. 진행 중인 질문에는 영향이 없다.
 현재 어떤 설정인지는 파란색으로 표시된다.
@@ -230,10 +248,10 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 
 | 버튼 | 결과 | 남는 것 |
 | --- | --- | --- |
-| 계획 수락 | 모델 계획대로 진행 | `planned_by: model` |
-| 의견 첨부 (Qwen + 사람) | 계획 유지 + 의견 추가 | `operator_note` |
-| 계획 교체 | 계획 유지, 사람 지시를 우선 | `operator_instruction` |
-| Qwen 계획 버리고 사람 의견만 | 계획을 버림 | `planned_by: operator`, `model_plan` |
+| `Qwen 계획대로` | 모델 계획대로 진행 | `planned_by: model` |
+| `참고로 첨부 (계획 유지)` | 계획 유지 + 참고 의견 | `operator_note` |
+| `내 지시 우선 (계획 유지)` | 계획은 남기고 사람 지시를 우선 | `operator_instruction` |
+| `Qwen 계획 버리고 내 지시만` | 계획을 버림 | `planned_by: operator`, `model_plan` |
 | 라운드 건너뛰기 | 이 라운드를 통째로 넘김 | `decision: skipped` |
 
 헤더의 컨트롤은 언제든 눌러 개입 방식 자체를 바꾼다
@@ -243,9 +261,9 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 
 | 버튼 | 결과 | 남는 것 |
 | --- | --- | --- |
-| 모델 판정 수락 | 모델 판정대로 | `verified_by: model` |
-| 의견 첨부 | 판정 유지 + 의견 | `operator_note` |
-| keep / revert / done 으로 교체 | 판정을 사람 것으로 | `model_decision`, `operator_override` |
+| `Qwen 판정대로` | 모델 판정대로 | `verified_by: model` |
+| `참고로 첨부 (판정 유지)` | 판정 유지 + 참고 의견 | `verified_by: model+operator` |
+| `내 판정: keep/revert/done` | Qwen 판정을 버리고 사람 판정 | `verified_by: operator`, `model_decision` |
 
 ### VERIFY 화면 (`--verify human`)
 
@@ -267,7 +285,7 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 | 파일 | 필드 |
 | --- | --- |
 | `rounds/rNN/plan.json` | `planned_by`, `operator_note`, `operator_instruction`, `operator_region`, `model_plan` |
-| `rounds/rNN/verify.json` | `verified_by`, `model_decision`, `operator_override`, `operator_note` |
+| `rounds/rNN/verify.json` | `verified_by` (`model` / `model+operator`=참고 의견만 / `operator`=사람이 판정), `model_decision`, `operator_override`, `operator_note` |
 | `summary.json` | `verify_mode`(시작 설정), `verify_mode_final`(종료 시점 설정), `operator_interventions`, `operator_rounds`, `skipped`, 라운드별 `operator` |
 
 모델 단독 성능을 보려면 `--ui` 없이 돌린 실행을 보고, 개입이 섞인 실행에서는

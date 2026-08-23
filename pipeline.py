@@ -316,8 +316,8 @@ class Pipeline:
         return self._input(prompt, context)
 
     PLAN_PROMPT = (
-        "개입 (Enter=수락 / a <의견>=첨언 / o <지시>=계획 교체 / "
-        "x <지시>=Qwen 계획 버리고 사람 의견만 / s=건너뛰기): "
+        "개입 (Enter=Qwen 계획대로 / a <의견>=참고로 첨부 / o <지시>=지시 우선 / "
+        "x <지시>=Qwen 계획 버리고 내 지시만 / s=건너뛰기): "
     )
 
     def review_plan(self, plan: dict, context: dict | None = None) -> dict:
@@ -340,10 +340,10 @@ class Pipeline:
             "text": True,
             "enter_value": "a @text",
             "choices": [
-                {"label": "계획 수락", "value": "", "style": "primary"},
-                {"label": "의견 첨부 (Qwen + 사람)", "value": "a @text"},
-                {"label": "계획 교체", "value": "o @text"},
-                {"label": "Qwen 계획 버리고 사람 의견만", "value": "x @text"},
+                {"label": "Qwen 계획대로", "value": "", "style": "primary"},
+                {"label": "참고로 첨부 (계획 유지)", "value": "a @text"},
+                {"label": "내 지시 우선 (계획 유지)", "value": "o @text"},
+                {"label": "Qwen 계획 버리고 내 지시만", "value": "x @text"},
                 {"label": "라운드 건너뛰기", "value": "s", "style": "warn"},
             ],
         }
@@ -403,13 +403,14 @@ class Pipeline:
                     LOG.info("PLAN: operator marked a region %s", self._last_region)
                 self.interventions += 1
                 return plan
-            print("a(첨언) / o(계획 교체) / x(사람 의견만) / s(건너뛰기) 중에서 골라주세요.")
+            print("a(참고 첨부) / o(지시 우선) / x(계획 버리고 내 지시만) / s(건너뛰기) 중에서 골라주세요.")
             if attempt == 2:
                 print("입력을 이해하지 못했습니다. 계획을 그대로 수락합니다.")
         return plan
 
     VERIFY_PROMPT = (
-        "개입 (Enter=수락 / a <의견>=의견 첨부 / keep|revert|done=판정 교체): "
+        "개입 (Enter=Qwen 판정대로 / a <의견>=참고로 첨부 / "
+        "keep|revert|done=Qwen 판정 버리고 내 판정: ): "
     )
 
     def review_verify(self, verdict: dict, context: dict | None = None) -> dict:
@@ -431,11 +432,11 @@ class Pipeline:
             "image2_label": (context or {}).get("image2_label", ""),
             "text": True,
             "choices": [
-                {"label": "모델 판정 수락", "value": "", "style": "primary"},
-                {"label": "의견 첨부", "value": "a @text"},
-                {"label": "keep 으로 교체", "value": "keep"},
-                {"label": "revert 로 교체", "value": "revert", "style": "warn"},
-                {"label": "done 으로 교체", "value": "done"},
+                {"label": "Qwen 판정대로", "value": "", "style": "primary"},
+                {"label": "참고로 첨부 (판정 유지)", "value": "a @text"},
+                {"label": "내 판정: keep", "value": "keep"},
+                {"label": "내 판정: revert", "value": "revert", "style": "warn"},
+                {"label": "내 판정: done", "value": "done"},
             ],
         }
         for attempt in range(3):
@@ -464,13 +465,15 @@ class Pipeline:
                 verdict["model_decision"] = verdict.get("decision")
                 verdict["operator_override"] = head
                 verdict["decision"] = head
-                verdict["verified_by"] = "model+operator"
+                # The decision is the operator's now. Mirrors planned_by on the
+                # PLAN side: the model's verdict is kept only as a record.
+                verdict["verified_by"] = "operator"
                 if rest:
                     verdict["operator_note"] = rest
                 self.interventions += 1
                 LOG.info("VERIFY: operator overrode %s -> %s", verdict["model_decision"], head)
                 return verdict
-            print("a(의견 첨부) / keep / revert / done 중에서 골라주세요.")
+            print("a(참고 첨부) / keep / revert / done(내 판정) 중에서 골라주세요.")
             if attempt == 2:
                 print("입력을 이해하지 못했습니다. 모델 판정을 그대로 둡니다.")
         return verdict
