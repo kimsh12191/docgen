@@ -1429,6 +1429,120 @@ def test_loop_makes_progress() -> None:
     ok("a genuine done still ends the run")
 
 
+# ------------------- 18. a structural change has a mode it can fit in
+
+def test_section_mode(llm_base: str, renderer_url: str) -> None:
+    """The middle mode. Without it a restructure has nowhere to go."""
+    print("\n[18] 구조 변경이 들어갈 자리가 있다")
+    import shutil
+
+    from pipeline import HTML_WARN_SIZE, Pipeline
+    from utils import apply_section
+
+    doc = (
+        "<!doctype html><html><body><div class='sheet'>"
+        "<table class='grid'><tr><td>a</td></tr><tr><td>b</td></tr></table>"
+        "<p>after</p></div></body></html>"
+    )
+
+    # 1. A block is rebuilt wholesale -- the thing patch mode cannot express.
+    rebuilt = "<table class='grid'><tr><th>h</th><th>i</th></tr><tr><td>a</td><td>b</td></tr></table>"
+    out, span = apply_section(doc, {
+        "find_start": "<table class='grid'>", "find_end": "</table>", "replace": rebuilt,
+    })
+    assert rebuilt in out and "<p>after</p>" in out, out
+    assert "<tr><td>a</td></tr>" not in out, "the old block survived"
+    assert "->" in span, span
+    ok(f"a whole block is replaced by new markup, the rest untouched ({span})")
+
+    # 2. The end anchor is searched AFTER the start, so a closing tag that also
+    #    appears earlier in the document cannot select the wrong span.
+    nested = "<div></div><section id='x'><p>one</p></section><p>tail</p>"
+    out2, _ = apply_section(nested, {
+        "find_start": "<section id='x'>", "find_end": "</section>", "replace": "<hr>",
+    })
+    assert out2 == "<div></div><hr><p>tail</p>", out2
+    ok("the span runs from find_start to the first find_end after it")
+
+    for label, edit in [
+        ("missing find_start", {"find_start": "<nope>", "find_end": "</table>", "replace": "x"}),
+        ("ambiguous find_start", {"find_start": "<tr>", "find_end": "</tr>", "replace": "x"}),
+        ("find_end never follows", {"find_start": "<p>after</p>", "find_end": "<table",
+                                   "replace": "x"}),
+        ("empty replace", {"find_start": "<table class='grid'>", "find_end": "</table>",
+                           "replace": ""}),
+        ("no change", {"find_start": "<table class='grid'>", "find_end": "</table>",
+                       "replace": "<table class='grid'><tr><td>a</td></tr>"
+                                  "<tr><td>b</td></tr></table>"}),
+        ("not an object", ["nope"]),
+    ]:
+        try:
+            apply_section(doc, edit)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{label} should have been rejected")
+    ok("missing / ambiguous / unterminated / empty / no-op section edits all rejected")
+
+    # 3. Routing. The size override is the point: a global plan on a document
+    #    too big to re-emit must still produce a real change, not a dead round.
+    small, big = 1000, HTML_WARN_SIZE + 1
+    cases = [
+        ({"scope": "local"}, small, "patch"),
+        ({"scope": "section"}, small, "section"),
+        ({"scope": "global"}, small, "rewrite"),
+        ({"scope": "global"}, big, "section"),
+        ({"scope": "Local edit"}, small, "patch"),
+        ({}, small, "section"),
+        ({"scope": "whatever"}, small, "section"),
+    ]
+    for plan, size, expected in cases:
+        got = Pipeline.action_mode(plan, size)
+        assert got == expected, f"scope={plan.get('scope')!r} size={size} -> {got}, want {expected}"
+    ok("local->patch, section->section, global->rewrite, oversized global->section")
+
+    # 4. End to end: a section round has to land a bigger change than the
+    #    one-declaration patch rounds the loop was producing before.
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+
+    mock_services.LLMHandler.plan_calls = 0
+    mock_services.LLMHandler.scope_override = "section"
+    out_dir = ROOT / "out" / "section_flow"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    try:
+        summary = Pipeline(cfg, out_dir).build(make_source_png(Path("tmp/source_fixture.png")))
+    finally:
+        mock_services.LLMHandler.scope_override = None
+
+    round1 = summary["rounds"][0]
+    assert round1["mode"] == "section", round1
+    assert round1["decision"] in ("keep", "done"), round1
+    assert round1["changed_lines"] >= 4, round1
+    ok(f"a section round rebuilt the block: {round1['changed_lines']} lines changed")
+
+    clone = (out_dir / "clone.html").read_text()
+    assert "<th>Total</th>" in clone, "the rebuilt block never reached clone.html"
+    okc, reason = utils.html_sanity_check(clone)
+    assert okc, reason
+    ok("the rebuilt block is in clone.html and the document is still valid")
+
+    payload = json.loads((out_dir / "rounds" / "r01" / "patch.json").read_text())
+    assert payload["find_start"] and payload["replace"], payload
+    ok("the section payload is kept on disk like a patch payload")
+
+    # 5. VERIFY must not revert a big edit just because something regressed.
+    flat = " ".join(prompts.VERIFY_USER.split())
+    assert "Judge the net result" in flat, flat
+    assert "not that you can point at one thing that got worse" in flat, flat
+    ok("VERIFY weighs the net result instead of any single regression")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1451,6 +1565,7 @@ def main() -> int:
     test_config_without_tomllib()
     test_renderer_stays_external()
     test_loop_makes_progress()
+    test_section_mode(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

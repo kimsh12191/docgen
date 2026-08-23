@@ -198,6 +198,8 @@ class LLMHandler(BaseHTTPRequestHandler):
     force_length_on_action = False
     bootstrap_html_override = None
     last_action_html_len = None
+    #: Forces every PLAN to report this scope, so a test can drive one mode.
+    scope_override = None
 
     def log_message(self, *args):
         pass
@@ -266,12 +268,29 @@ class LLMHandler(BaseHTTPRequestHandler):
                 LLMHandler.plan_calls += 1
                 n = LLMHandler.plan_calls
             # Rounds 1, 2, 4 are local (patch path); round 3 is global (rewrite path).
-            scope = "global" if n == 3 else "local"
+            scope = LLMHandler.scope_override or ("global" if n == 3 else "local")
             return (
                 "<think>looking at both images closely</think>"
                 + _plan_json(f"target-{n}", f"goal number {n}", scope),
                 "plan",
             )
+
+        if "Rebuild one block of this document" in text:
+            assert n_images in (2, 4), f"section action must send 2 or 4 images, got {n_images}"
+            start = text.find("```html\n")
+            end = text.find("\n```", start)
+            LLMHandler.last_action_html_len = end - start - 8 if start >= 0 and end > start else -1
+            # A real restructure of one block: three columns become four, and
+            # the markup inside changes shape. Patch mode could not express it.
+            rebuilt = (
+                '<table>\n'
+                '    <tr><th>Item</th><th>Q1</th><th>Q2</th><th>Total</th></tr>\n'
+                '    <tr><td>Travel</td><td>1,200</td><td>1,450</td><td>2,650</td></tr>\n'
+                '    <tr><td>Equipment</td><td>3,400</td><td>2,900</td><td>6,300</td></tr>\n'
+                '  </table>'
+            )
+            payload = {"find_start": "<table>", "find_end": "</table>", "replace": rebuilt}
+            return "```json\n" + json.dumps(payload) + "\n```", "action"
 
         if "Apply the plan" in text:
             # 2 normally; 4 when the operator marked a region (source+render crops).

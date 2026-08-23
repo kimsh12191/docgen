@@ -13,6 +13,7 @@ from llm import LLMError, QwenClient, image_part, system_message, user_message
 from renderer import RendererClient, RendererError
 from utils import (
     apply_edits,
+    apply_section,
     diff_line_count,
     clean_html_output,
     ensure_dir,
@@ -300,26 +301,49 @@ class Pipeline:
         )
 
     @staticmethod
-    def action_mode(plan: dict) -> str:
-        """PLAN already decides global vs local; that is the mode switch.
+    def action_mode(plan: dict, html_size: int = 0) -> str:
+        """PLAN's scope is the mode switch, with one size-driven override.
 
-        local  -> patch:   exact search/replace, response size tracks the edit
-        global -> rewrite: full document, needed when the layout is restructured
+        local   -> patch:   exact search/replace, response size tracks the edit
+        section -> section: one block rebuilt, response size tracks the block
+        global  -> rewrite: full document, when the page layout itself is wrong
+
+        Without the middle mode a structural problem has nowhere to go: patch
+        can only nudge properties, and rewrite has to re-emit the whole
+        document. That is how a loop ends up changing one declaration a round.
+
+        An unrecognised scope lands on section as well - it is the mode that can
+        still make a real change without betting the round on max_tokens.
         """
         scope = str(plan.get("scope", "")).strip().lower()
-        return "patch" if scope.startswith("local") else "rewrite"
+        if scope.startswith("local"):
+            return "patch"
+        if scope.startswith("global"):
+            # A rewrite has to emit the whole document. Past this size that is a
+            # coin flip against max_tokens, and a truncated response costs the
+            # round; rebuilding the worst block instead actually lands.
+            if html_size > HTML_WARN_SIZE:
+                LOG.warning(
+                    "ACTION: plan is global but the document is %d chars; "
+                    "rebuilding one block instead of risking a truncated rewrite",
+                    html_size,
+                )
+                return "section"
+            return "rewrite"
+        if not scope.startswith("section"):
+            LOG.warning("ACTION: unrecognised plan scope %r; treating it as section", scope)
+        return "section"
+
+    ACTION_TEMPLATES = {
+        "patch": "ACTION_PATCH_USER",
+        "section": "ACTION_SECTION_USER",
+        "rewrite": "ACTION_REWRITE_USER",
+    }
 
     def action(self, plan: dict, current_html: str, source_png: Path, current_png: bytes):
         """ACTION. Thinking OFF. Returns (mode, LLMResponse)."""
-        mode = self.action_mode(plan)
-        if mode == "rewrite" and len(current_html) > HTML_WARN_SIZE:
-            LOG.warning(
-                "ACTION is rewriting a %d-char document; a full rewrite this large "
-                "risks hitting max_tokens=%s and being rejected",
-                len(current_html),
-                self.cfg.llm.max_tokens,
-            )
-        template = prompts.ACTION_PATCH_USER if mode == "patch" else prompts.ACTION_REWRITE_USER
+        mode = self.action_mode(plan, len(current_html))
+        template = getattr(prompts, self.ACTION_TEMPLATES[mode])
         text = template.format(
             plan=json.dumps(plan, ensure_ascii=False, indent=2),
             html=current_html,
@@ -351,11 +375,15 @@ class Pipeline:
 
     @staticmethod
     def apply(action_raw: str, previous_html: str, mode: str = "rewrite") -> str:
-        """APPLY (Python). patch -> exact edits, rewrite -> fence removal. Raises on reject."""
+        """APPLY (Python). patch -> exact edits, section -> splice, rewrite -> fence removal."""
         if mode == "patch":
             payload = extract_json(action_raw)
             html, applied = apply_edits(previous_html, payload.get("edits"))
             LOG.info("APPLY: %d patch edit(s): %s", len(applied), "; ".join(applied)[:300])
+        elif mode == "section":
+            payload = extract_json(action_raw)
+            html, span = apply_section(previous_html, payload)
+            LOG.info("APPLY: rebuilt block %r (%s)", str(payload.get("find_start"))[:60], span)
         else:
             html = clean_html_output(action_raw)
 
@@ -659,7 +687,7 @@ class Pipeline:
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
-            if mode == "patch":
+            if mode in ("patch", "section"):
                 try:
                     write_json(rdir / "patch.json", extract_json(action_raw))
                 except ValueError:

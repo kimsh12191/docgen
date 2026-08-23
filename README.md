@@ -25,24 +25,35 @@ CV 파이프라인, heuristic rule 모음, 구조물별 action 타입은 없다.
 실제 렌더를 비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로
 판정한다.
 
-## ACTION의 두 가지 모드
+## ACTION의 세 가지 모드
 
 PLAN이 이미 내놓는 `scope`가 그대로 모드 스위치다. 별도 taxonomy는 없다.
 
-| PLAN scope | ACTION 모드 | 모델이 돌려주는 것 |
-| --- | --- | --- |
-| `local` | patch | `{"edits": [{"find": ..., "replace": ...}]}` 정확 문자열 치환 |
-| `global` | rewrite | HTML 전문 |
-| 누락·불명 | rewrite | 안전한 기본값 |
+| PLAN scope | ACTION 모드 | 모델이 돌려주는 것 | 바꿀 수 있는 것 |
+| --- | --- | --- | --- |
+| `local` | patch | `{"edits": [{"find": ..., "replace": ...}]}` 정확 문자열 치환 | 속성값 |
+| `section` | section | `{"find_start": ..., "find_end": ..., "replace": ...}` 블록 하나 전체 | **그 블록의 구조까지** |
+| `global` | rewrite | HTML 전문 | 페이지 레이아웃 전체 |
+| `global`인데 문서가 `HTML_WARN_SIZE`(60000자) 초과 | section | 위와 같음 | 잘림으로 라운드를 날리는 대신 최악의 블록을 다시 만든다 |
+| 누락·불명 | section | 위와 같음 | 중간 모드가 가장 안전한 기본값이다 |
 
-patch 모드는 응답 크기가 **문서 크기가 아니라 수정 크기**에 비례하므로, 빽빽한
-문서에서 ACTION이 `max_tokens`에 걸려 매 라운드 거부되는 문제를 원인 단계에서
-없앤다.
+**가운데 모드가 왜 있는가.** patch는 구조를 못 바꾼다 — 표 50줄을 재구성하려면
+모델이 그 50줄을 `find`에 그대로 베껴 넣어야 하고, 그건 현실적으로 실패한다.
+rewrite는 문서 전문을 다시 뱉어야 해서 빽빽한 문서에서는 `max_tokens`에 걸린다.
+이 두 모드만 있으면 "이 표 하나를 다시 만들어라"가 갈 곳이 없고, 루프는 매 라운드
+CSS 한 줄만 고치게 된다. section 모드는 짧은 앵커 두 개(`find_start`,
+`find_end`)만 모델이 베끼고 그 사이 구간은 Python이 계산하므로, **응답 크기는 새
+블록 크기에만 비례하면서 그 블록 안에서는 구조를 마음대로 바꿀 수 있다.**
 
-patch의 `find`는 적용 시점에 **정확히 1회** 매칭되어야 한다. 없거나 여러 곳에
-매칭되거나 no-op이면 그 라운드를 거부하고 현재 HTML은 건드리지 않는다. 절반만
-적용된 patch는 거부된 라운드보다 나쁘다 — VERIFY가 실제로 일어나지 않은 수정을
-판정하게 되기 때문이다.
+`find_start`는 적용 시점에 **정확히 1회** 매칭되어야 하고, `find_end`는
+`find_start` **뒤에서** 처음 나오는 것을 쓴다(그래서 문서 앞쪽에 같은 닫는 태그가
+있어도 구간을 잘못 잡지 않는다).
+
+patch의 `find`도 **정확히 1회** 매칭되어야 한다. 없거나 여러 곳에 매칭되거나
+형식이 틀리면 그 라운드를 거부하고 현재 HTML은 건드리지 않는다. 절반만 적용된
+patch는 거부된 라운드보다 나쁘다 — VERIFY가 실제로 일어나지 않은 수정을 판정하게
+되기 때문이다. 단 `find`와 `replace`가 같은 edit(모델이 안 바뀐 줄을 같이 적어
+보낸 경우)은 그것만 버리고 옆의 진짜 수정은 살린다.
 
 ## 요구 사항
 
@@ -416,7 +427,7 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `reverted` | 렌더는 됐지만 더 나빠져서 되돌린 라운드 수 |
 | `rejected` | HTML이 깨졌거나 patch가 적용되지 않았거나, 수정이 아무 변화도 만들지 못해 렌더까지 가지 못한 라운드 수 |
 | `errors` | LLM 호출 자체가 실패한 라운드 수 |
-| `mode` | 그 라운드가 `patch`였는지 `rewrite`였는지 |
+| `mode` | 그 라운드가 `patch`(속성만) / `section`(블록 하나 재구성) / `rewrite`(전문) 중 무엇이었는지. **`patch`만 계속 나오면 구조를 바꾸는 라운드가 한 번도 없었다는 뜻이다.** |
 | `thinking_control` | `false`면 서버가 `chat_template_kwargs`를 거부해 stage별 thinking 제어 없이 돌았다는 뜻 |
 | `verify_mode` | 시작할 때의 VERIFY 개입 여부: `model`(안 물음) / `both`(물음) |
 | `verify_mode_final` | 끝날 때의 방식. 다르면 실행 중에 바꾼 것이다 |
@@ -474,9 +485,10 @@ Already tried without success:
 
 | 증상 | 원인과 대응 |
 | --- | --- |
-| **PLAN·VERIFY를 다 거쳤는데 `clone.png`가 눈에 보이게 안 바뀐다** | `summary.json`의 `kept_line_changes`를 먼저 본다. **0에 가깝다** = 수정이 아예 안 쌓였다 → 아래 세 줄(`rejected` 많음 / `reverted` 많음 / `done` 조기 종료) 중 어느 것인지 `rounds`에서 가른다. **0은 아닌데 화면이 그대로** = 라운드마다 한 곳만 고치고 있다. `rounds[].changed_lines`가 `1`~`2`로 깔려 있으면 이 경우다. 같은 불일치가 표 10줄에 있으면 10줄을 한 라운드에 고치라고 PLAN·ACTION 프롬프트가 지시하지만, 모델이 안 따르면 `--interactive`로 "표 전체 행에 적용"처럼 직접 지시하는 게 가장 빠르다. `config.toml`의 `max_rounds`를 늘리는 건 그 다음이다. |
+| **PLAN·VERIFY를 다 거쳤는데 `clone.png`가 눈에 보이게 안 바뀐다** | `summary.json`의 `kept_line_changes`를 먼저 본다. **0에 가깝다** = 수정이 아예 안 쌓였다 → 아래 세 줄(`rejected` 많음 / `reverted` 많음 / `done` 조기 종료) 중 어느 것인지 `rounds`에서 가른다. **0은 아닌데 화면이 그대로** = 라운드마다 한 곳만 고치고 있다. `rounds[].changed_lines`가 `1`~`2`로 깔려 있으면 이 경우다. 같은 불일치가 표 10줄에 있으면 10줄을 한 라운드에 고치라고 PLAN·ACTION 프롬프트가 지시하지만, 모델이 안 따르면 `--interactive`로 "표 전체 행에 적용"처럼 직접 지시하는 게 가장 빠르다. `config.toml`의 `max_rounds`를 늘리는 건 그 다음이다. 그리고 `rounds[].mode`를 본다 — **전부 `patch`면 구조를 바꿀 수 있는 라운드가 한 번도 없었다**는 뜻이므로, PLAN이 `scope: "section"`을 내도록 `--interactive`에서 "이 표는 구조 자체가 틀렸다"처럼 지시한다. |
 | `doctor`의 `[LLM]` 또는 `[Renderer]`가 FAIL | 서비스에 못 닿는다. 사내망·VPN·방화벽을 먼저 확인한다. 코드를 고칠 일이 아니다. |
-| `rejected`가 대부분이고 `mode`가 `rewrite` | 문서가 커서 ACTION이 `max_tokens`에 걸린다. 로그의 `finish_reason == 'length'` 경고로 확인된다. PLAN이 `global`만 내고 있다는 뜻이므로 PLAN 프롬프트를 국소 수정 쪽으로 유도해야 한다. |
+| `rejected`가 대부분이고 `mode`가 `rewrite` | 문서가 커서 ACTION이 `max_tokens`에 걸린다. 로그의 `finish_reason == 'length'` 로 확인된다. 문서가 60000자를 넘으면 `global` 계획은 자동으로 `section` 모드로 내려가므로(로그에 그 이유가 찍힌다) 이게 계속 보이면 문서가 그보다 작은데도 잘리는 경우다 — `max_tokens`를 올리거나 PLAN이 `section`을 내도록 유도한다. |
+| `rejected`가 대부분이고 `mode`가 `section` | 앵커 문제다. `error.json`에 `find_start`가 없었는지 여러 곳에 매칭됐는지, `find_end`가 뒤에 안 나왔는지가 그대로 찍힌다. 모델이 앵커를 그대로 베끼지 못하고 있다는 뜻이므로 `patch.json`의 `find_start`를 실제 HTML과 대조해 본다. |
 | `rejected`가 대부분이고 `mode`가 `patch` | `find` 문자열이 문서에 없거나 여러 곳에 매칭된다. `error.json`에 어느 문자열이 문제였는지 그대로 찍힌다. patch 프롬프트에서 "유일하게 매칭되는 짧은 문자열" 지시를 강화할 지점이다. |
 | `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. 이 값은 다음 라운드 PLAN에 전달되므로, 계속 같은 값이면 PLAN이 그걸 못 고치고 있다는 뜻이다. |
 | `thinking_control`이 `false` | 서버가 해당 파라미터를 안 받는다. 동작은 하지만 PLAN·VERIFY가 thinking 없이 판단하므로 품질이 떨어질 수 있다. |
@@ -490,17 +502,22 @@ Already tried without success:
 정직하게 적어 둔다.
 
 * **검증됨** — loop 로직(keep / revert / reject / done, 산출물 구조),
-  patch 가드(없는·중복·잘못된 형식 edit 거부, 안 바뀌는 edit만 골라 버리기), renderer `/probe`
+  patch·section 가드(없는·중복·잘못된 형식 edit 거부, 안 바뀌는 edit만 골라
+  버리기, section 구간 계산), scope→ACTION 모드 라우팅, renderer `/probe`
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 109개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 117개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
 * **미검증(브라우저)** — 버튼 클릭과 영역 드래그는 자동 테스트에 없다.
   Playwright로 직접 띄워 확인했고, 그 과정에서 모든 버튼이 동작하지 않던 결함이
   나왔다. UI를 고치면 브라우저로 한 번 눌러보는 것이 필요하다.
+* **미검증** — Qwen이 `scope: "section"` 을 실제로 얼마나 내는지, 그리고 앵커 두
+  개를 문서에서 그대로 베껴 오는지. section 모드가 큰 변경을 담을 수 있다는 것은
+  검증됐지만, 모델이 그 모드를 고르지 않으면 루프는 다시 patch만 돌린다.
+  `summary.json`의 `rounds[].mode` 분포가 이걸 그대로 보여준다.
 * **미검증** — 사내 Qwen이 이 프롬프트에 어떻게 반응하는지. 프롬프트 품질과
   수렴 속도는 실제 문서로 돌려봐야 안다. 위 "처음 실행할 때"의 3번을 짧게
   돌려서 `plan.json`·`verify.json`을 먼저 읽어보는 것을 권한다.
@@ -577,8 +594,8 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 109개가
-17개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 117개가
+18개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -613,6 +630,11 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   집계되는지, PLAN·ACTION 프롬프트가 "불일치가 나타나는 모든 곳"을 고치라고
   지시하는지, `done` 이면서 남은 문제를 같이 적어 보낸 판정이 `keep` 으로
   내려가 루프가 계속되는지(정상 `done` 은 그대로 종료)
+* section 모드 — 블록 하나가 통째로 새 markup으로 바뀌는지, `find_end` 를
+  `find_start` 뒤에서만 찾는지, 없는·중복·구간이 안 닫히는·빈·안 바뀌는 section
+  edit 전부 거부, scope→모드 라우팅 7가지(문서가 크면 `global` 이 `section` 으로
+  내려가는 것 포함), section 라운드가 실제로 clone.html까지 도달하는지, VERIFY가
+  단일 회귀가 아니라 순증감으로 판정하는지
 
 ### 2. 실제 렌더러로 확인하기
 

@@ -284,6 +284,48 @@ def html_sanity_check(html: str, min_length: int = 200) -> tuple[bool, str]:
     return True, "ok"
 
 
+def apply_section(html: str, edit) -> tuple[str, str]:
+    """Replace one whole block, located by a start and an end anchor.
+
+    Patch mode would need the model to copy the entire span into `find`, which
+    is hopeless for a fifty-row table; rewrite mode would need it to re-emit the
+    whole document. Here it copies two short anchors instead and Python works
+    out the span between them, so the response carries only the new block and
+    the block may be restructured completely.
+    """
+    if not isinstance(edit, dict):
+        raise ValueError("section edit is not an object")
+    start = edit.get("find_start")
+    end = edit.get("find_end")
+    replace = edit.get("replace")
+    for name, value in (("find_start", start), ("find_end", end), ("replace", replace)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"section edit has an empty or non-string {name!r}")
+
+    hits = html.count(start)
+    if hits == 0:
+        raise ValueError(f"section 'find_start' is not in the document: {start[:100]!r}")
+    if hits > 1:
+        raise ValueError(
+            f"section 'find_start' matches {hits} places, it must be unique: {start[:100]!r}"
+        )
+
+    begin = html.index(start)
+    # Searched after the start anchor, so a closing tag that also occurs earlier
+    # in the document does not pick the wrong span.
+    tail = html.find(end, begin + len(start))
+    if tail == -1:
+        raise ValueError(
+            f"section 'find_end' does not occur after 'find_start': {end[:100]!r}"
+        )
+    stop = tail + len(end)
+
+    section = html[begin:stop]
+    if section == replace:
+        raise ValueError("section edit asks for no change")
+    return html[:begin] + replace + html[stop:], f"{len(section)} -> {len(replace)} chars"
+
+
 def diff_line_count(before: str, after: str) -> int:
     """How many lines differ between two documents.
 

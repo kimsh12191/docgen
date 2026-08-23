@@ -45,11 +45,19 @@ instead of listing many tiny differences.
 One round fixes one problem, but it fixes it EVERYWHERE it appears.
 If the same mismatch shows up in ten table rows, the goal is all ten rows,
 not one of them. Say so in the goal.
-Decide whether the problem is global or local.
+
+Decide how much of the document has to change, and put that in "scope":
+- "local": the structure is right, some properties are wrong.
+- "section": one block - a table, a header, a column, a stamp area - is built
+  wrong and has to be rebuilt. Name that block in "target".
+- "global": the whole page layout is wrong.
+Prefer "section" over "local" whenever the structure inside a block is wrong.
+Adjusting properties cannot fix a block that is built the wrong way, and a
+round spent adjusting them is a round wasted.
 Do not write HTML yet.
 Return JSON only:
 {
-  "scope": "global or local",
+  "scope": "global | section | local",
   "target": "short description of the target",
   "problem": "what visibly differs",
   "cause": "most likely cause",
@@ -113,6 +121,44 @@ Preserve parts that already match.
 
 Return the complete modified HTML document, and nothing else."""
 
+
+# The middle mode. Patch cannot restructure (the model would have to copy a
+# fifty-row table verbatim into "find") and rewrite cannot fit a dense document
+# inside max_tokens. Here the model copies two short anchors and Python works
+# out the span between them, so the response carries only the new block.
+ACTION_SECTION_USER = """Image 1 is the source document.
+Image 2 is the current HTML render.
+
+This is the plan for the next edit:
+{plan}
+
+Here is the current HTML:
+```html
+{html}
+```
+
+Rebuild one block of this document so that it matches the source.
+
+Pick the smallest block that contains the whole problem - one table, one header,
+one column, one section - and write that block again from scratch. Inside that
+block you may change the structure, the markup and the CSS as much as the source
+requires. This is NOT a minimal edit: inside the block, make it right.
+Leave everything outside the block exactly as it is.
+
+Identify the block with two short anchors copied verbatim from the HTML above:
+- "find_start": the block's opening tag, for example <table class="grid">.
+  It must appear EXACTLY ONCE in the HTML above.
+- "find_end": the text that closes the block, for example </table>.
+  The first occurrence after find_start is the one used, so this one does not
+  have to be unique.
+
+Return JSON only:
+{{
+  "find_start": "opening tag, copied verbatim",
+  "find_end": "closing text, copied verbatim",
+  "replace": "the complete new block, including its own opening and closing tags"
+}}"""
+
 VERIFY_SYSTEM = "You are a strict reviewer of visual document recreations."
 
 VERIFY_USER = """Image 1: source document
@@ -125,6 +171,11 @@ Answer:
 1. Did the intended change actually happen?
 2. Is the new render visibly closer to the source?
 3. Did the edit introduce any meaningful regression elsewhere?
+
+A bigger edit usually improves a lot and loses a little. Judge the net result.
+"revert" means the page as a whole is now further from the source - not that
+you can point at one thing that got worse while the rest improved.
+
 Choose exactly one:
 - keep
 - revert
