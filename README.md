@@ -121,6 +121,9 @@ out/sample/
 
 가장 쉬운 방법은 웹 UI다. 터미널만 쓰는 방법은 그 아래에 있다.
 
+> UI는 시나리오별 스크린샷과 함께 [`UI_docs/`](UI_docs/README.md) 에 따로
+> 정리해 두었다. 구조와 확장 방법은 [`UI_docs/ARCHITECTURE.md`](UI_docs/ARCHITECTURE.md).
+
 ### 웹 UI
 
 ```bash
@@ -440,7 +443,7 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | 파일 | 역할 |
 | --- | --- |
 | `run.py` | CLI: `doctor`, `render`, `build` |
-| `ui.py` | 로컬 검토 UI (표준 라이브러리만). 질문을 띄우고 답을 기다린다 |
+| `ui.py` | 로컬 검토 UI (표준 라이브러리만). 질문을 띄우고 답을 기다린다. 문서는 `UI_docs/` |
 | `config.py` | `config.toml` 로딩 |
 | `llm.py` | Qwen client (표준 `urllib`), message/image helper |
 | `renderer.py` | `/health` + `/probe` client와 probe script |
