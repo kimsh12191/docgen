@@ -124,7 +124,36 @@ def _content_bottom(img, threshold: int = 250) -> int:
     return height
 
 
-def side_by_side(panels: list[tuple[str, bytes | str]], path: str | os.PathLike) -> Path:
+def crop_normalized(source, rect: dict, margin: float = 0.03) -> bytes:
+    """Crop a normalised rect (0..1) out of an image, with a little context.
+
+    The rect is scale-free, so the same one applies to a source scan and to an
+    800px render even though their pixel sizes differ.
+    """
+    from PIL import Image
+
+    if isinstance(source, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(bytes(source)))
+    else:
+        img = Image.open(str(source))
+    img = img.convert("RGB")
+
+    def span(start: float, size: float, total: int) -> tuple[int, int]:
+        lo = max(0.0, start - margin)
+        hi = min(1.0, start + size + margin)
+        a, b = int(lo * total), int(hi * total)
+        if b - a < 8:  # never hand back a sliver
+            b = min(total, a + 8)
+        return a, b
+
+    x0, x1 = span(float(rect.get("x", 0)), float(rect.get("w", 1)), img.width)
+    y0, y1 = span(float(rect.get("y", 0)), float(rect.get("h", 1)), img.height)
+    return _to_png(img.crop((x0, y0, x1, y1)))
+
+
+def side_by_side(
+    panels: list[tuple[str, bytes | str]], path: str | os.PathLike
+) -> tuple[Path, list[dict]]:
     """Compose labelled images into one PNG so a person can compare them at a glance.
 
     Labels must be ASCII: the environment may have no font with wider coverage,
@@ -132,6 +161,9 @@ def side_by_side(panels: list[tuple[str, bytes | str]], path: str | os.PathLike)
 
     Trailing whitespace is cropped by the same amount on every panel, so the
     panels stay vertically comparable.
+
+    Returns (path, panel boxes). The boxes let a UI map a point on the composed
+    sheet back to a position within one panel.
     """
     from PIL import Image, ImageDraw
 
@@ -157,14 +189,16 @@ def side_by_side(panels: list[tuple[str, bytes | str]], path: str | os.PathLike)
 
     sheet = Image.new("RGB", (width, height), (238, 238, 238))
     draw = ImageDraw.Draw(sheet)
+    boxes: list[dict] = []
     x = 0
     for label, img in loaded:
         draw.text((x + 6, 5), label, fill=(0, 0, 0), font=font)
         sheet.paste(img, (x, bar))
         draw.rectangle([x, bar, x + img.width - 1, bar + img.height - 1], outline=(150, 150, 150))
+        boxes.append({"label": label, "x": x, "y": bar, "width": img.width, "height": img.height})
         x += img.width + gap
 
-    return write_bytes(path, _to_png(sheet))
+    return write_bytes(path, _to_png(sheet)), boxes
 
 
 def _to_png(img) -> bytes:

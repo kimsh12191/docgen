@@ -137,8 +137,22 @@ Return JSON only:
 OPERATOR_CONTRACT = """A human operator is taking part in this loop, so some of the input you get is written by a person, not by you:
 - "operator_instruction" in the plan: a human instruction that REPLACES the plan's own goal. Do what it says instead.
 - "operator_note" in the plan: a human comment to take into account WITHOUT discarding the plan.
+- "operator_region" in the plan: a human marked one area of the page. Confine the edit to it; two extra images zoom in on that area.
 - a history line marked (operator: ...): a human comment on an earlier round.
 The operator is looking at the same images you are. Prefer their input over your own earlier reasoning, but never over what the current images plainly show. If their input contradicts the images, say so rather than following it blindly."""
+
+
+def region_block(region: dict) -> str:
+    """Tells ACTION that the last two images are a zoom of a marked area."""
+    return (
+        "The operator marked one region of the page and wants the edit confined to it.\n"
+        f"Region (fraction of the page, from {region.get('panel') or 'the page'}): "
+        f"x={region.get('x')}, y={region.get('y')}, "
+        f"width={region.get('w')}, height={region.get('h')}.\n"
+        "The last two images are that region zoomed in: first from the source, "
+        "then from the current render.\n"
+        "Fix what those crops show. Leave the rest of the document alone."
+    )
 
 
 def operator_contract_block(active: bool) -> str:

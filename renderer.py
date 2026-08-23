@@ -8,6 +8,7 @@ contract.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import logging
 import urllib.error
@@ -122,6 +123,9 @@ class RendererClient:
             raise RendererError(f"{path} unreachable at {self.base_url}: {exc.reason}") from exc
         except TimeoutError as exc:
             raise RendererError(f"{path} timed out after {self.timeout}s") from exc
+        except (http.client.HTTPException, OSError) as exc:
+            # e.g. the renderer dropping the connection mid-request.
+            raise RendererError(f"{path} transport failure: {type(exc).__name__}: {exc}") from exc
 
         try:
             return json.loads(raw.decode("utf-8"))

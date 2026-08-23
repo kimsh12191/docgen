@@ -264,7 +264,8 @@ class LLMHandler(BaseHTTPRequestHandler):
             )
 
         if "Apply the plan" in text:
-            assert n_images == 2, f"action must send 2 images, got {n_images}"
+            # 2 normally; 4 when the operator marked a region (source+render crops).
+            assert n_images in (2, 4), f"action must send 2 or 4 images, got {n_images}"
             # Record how much of the document ACTION actually received.
             start = text.find("```html\n")
             end = text.find("\n```", start)

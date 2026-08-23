@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -164,9 +165,12 @@ class QwenClient:
                     attempts += 1
                     continue
 
-            except (urllib.error.URLError, TimeoutError) as exc:
+            except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+                # A dropped connection (http.client.RemoteDisconnected) is not a
+                # URLError, so it used to escape and kill the whole build. Any
+                # transport-level failure is retryable, not fatal.
                 reason = getattr(exc, "reason", exc)
-                last_error = LLMError(f"transport error: {reason}")
+                last_error = LLMError(f"transport error: {type(exc).__name__}: {reason}")
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 last_error = LLMError(f"non-JSON response: {exc}")
 

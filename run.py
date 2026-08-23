@@ -175,10 +175,18 @@ def cmd_build(args, cfg) -> int:
     verify_mode = args.verify or ("both" if interactive else "model")
     tty = sys.stdin.isatty()
 
+    # The UI exists to collect operator input, so turning it on means asking for
+    # it at both stages. Blank answer -> the model's own judgement is used.
+    if args.ui:
+        interactive = True
+        if args.verify is None:
+            verify_mode = "both"
+        tty = True  # the browser supplies the input, not the terminal
+
     if verify_mode == "human" and not tty:
         # There is no other source of a verdict, so this cannot be downgraded.
-        print("오류: --verify human 은 사람 입력이 필요한데 터미널이 아닙니다",
-              file=sys.stderr)
+        print("오류: --verify human 은 사람 입력이 필요합니다. "
+              "터미널에서 실행하거나 --ui 를 쓰세요", file=sys.stderr)
         return 1
     if interactive and not tty:
         # A blocked input() in a batch run would hang the whole build.
@@ -209,6 +217,16 @@ def cmd_build(args, cfg) -> int:
         print(f"오류: renderer health 검사에 실패해서 빌드를 시작하지 않습니다: {exc}", file=sys.stderr)
         return 1
 
+    server = None
+    prompter = None
+    if args.ui:
+        from ui import ReviewServer
+
+        server = ReviewServer(out_dir, port=args.ui_port, timeout=args.ui_timeout)
+        url = server.start()
+        prompter = server
+        print(f"검토 UI: {url}  (브라우저에서 열어두세요)")
+
     try:
         summary = Pipeline(
             cfg,
@@ -216,11 +234,15 @@ def cmd_build(args, cfg) -> int:
             notes=notes,
             interactive=interactive,
             verify_mode=verify_mode,
+            prompter=prompter,
         ).build(source)
     except (RendererError, LLMError, RuntimeError, FileNotFoundError) as exc:
         LOG.error("build failed: %s", exc)
         print(f"빌드 실패: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if server is not None:
+            server.stop()
 
     stop = STOP_REASON_KO.get(summary["stop_reason"], summary["stop_reason"])
     print(f"clone.html : {summary['clone_html']}")
@@ -280,6 +302,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--interactive",
         action="store_true",
         help="매 라운드 PLAN에 지시를 덧붙인다 (VERIFY는 --verify both 가 된다)",
+    )
+    build.add_argument(
+        "--ui",
+        action="store_true",
+        help="로컬 웹 UI로 개입한다. 비교 이미지를 보면서 버튼으로 판정한다",
+    )
+    build.add_argument("--ui-port", type=int, default=0, help="UI 포트 (기본: 임의 포트)")
+    build.add_argument(
+        "--ui-timeout",
+        type=int,
+        default=1800,
+        help="UI 응답 대기 시간(초). 넘으면 입력 없음으로 처리한다",
     )
     build.add_argument(
         "--verify",

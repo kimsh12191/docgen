@@ -5,9 +5,12 @@ Run: python3 tests/test_offline.py
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -427,34 +430,34 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     # --- interactive PLAN: replace the goal vs attach a note
     pipe.interactive = True
     pipe.operator_active = True
-    pipe._ask = lambda _p: "o 제목 크기부터 맞춰라"
+    pipe._ask = lambda *_a, **_k: "o 제목 크기부터 맞춰라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert plan["operator_instruction"] == "제목 크기부터 맞춰라", plan
     assert "operator_note" not in plan, plan
     assert plan["planned_by"] == "model+operator", plan
     ok("PLAN 'o' replaces the goal via operator_instruction")
 
-    pipe._ask = lambda _p: "a 표 정렬도 같이 보라"
+    pipe._ask = lambda *_a, **_k: "a 표 정렬도 같이 보라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert plan["operator_note"] == "표 정렬도 같이 보라", plan
     assert "operator_instruction" not in plan, plan
     assert plan["goal"] == "g", "attaching a note must not discard the model's plan"
     ok("PLAN 'a' attaches a note and leaves the model's plan intact")
 
-    pipe._ask = lambda _p: "a"
+    pipe._ask = lambda *_a, **_k: "a"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert "operator_note" not in plan and plan["planned_by"] == "model"
     ok("a bare 'a' with no text is refused rather than stored empty")
 
     # --- a VERIFY decision word typed at the PLAN prompt is caught, not injected
     replies = iter(["revert", "o 제목부터"])
-    pipe._ask = lambda _p: next(replies)
+    pipe._ask = lambda *_a, **_k: next(replies)
     plan = pipe.review_plan({"scope": "local"})
     assert plan["operator_instruction"] == "제목부터", plan
     ok("a VERIFY decision word typed at the PLAN prompt is re-asked, not injected")
 
     # --- interactive: skipping a round
-    pipe._ask = lambda _p: "s"
+    pipe._ask = lambda *_a, **_k: "s"
     try:
         pipe.review_plan({"scope": "local"})
     except SkipRound:
@@ -463,7 +466,7 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
         raise AssertionError("skip was not honoured")
 
     # --- interactive VERIFY: attach an opinion without changing the decision
-    pipe._ask = lambda _p: "a 표 우측 정렬이 아직 다르다"
+    pipe._ask = lambda *_a, **_k: "a 표 우측 정렬이 아직 다르다"
     v = pipe.review_verify({"decision": "keep", "verified_by": "model"})
     assert v["decision"] == "keep", "attaching an opinion must not change the verdict"
     assert v["operator_note"] == "표 우측 정렬이 아직 다르다", v
@@ -472,14 +475,14 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     ok("VERIFY 'a' attaches an opinion and leaves the model's decision standing")
 
     # --- interactive VERIFY: override, with an optional reason on the same line
-    pipe._ask = lambda _p: "revert 표가 더 어긋났다"
+    pipe._ask = lambda *_a, **_k: "revert 표가 더 어긋났다"
     v = pipe.review_verify({"decision": "keep", "verified_by": "model"})
     assert v["decision"] == "revert" and v["model_decision"] == "keep", v
     assert v["operator_note"] == "표가 더 어긋났다", v
     ok("VERIFY override accepts a reason on the same line")
 
     # --- interactive: overriding VERIFY, keeping the model's own verdict
-    pipe._ask = lambda _p: "revert"
+    pipe._ask = lambda *_a, **_k: "revert"
     verdict = pipe.review_verify({"decision": "keep", "reason": "looks better"})
     assert verdict["decision"] == "revert", verdict
     assert verdict["model_decision"] == "keep", verdict
@@ -488,13 +491,13 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
 
     # --- an override equal to the model's decision is not counted as intervention
     before = pipe.interventions
-    pipe._ask = lambda _p: "keep"
+    pipe._ask = lambda *_a, **_k: "keep"
     pipe.review_verify({"decision": "keep"})
     assert pipe.interventions == before
     ok("agreeing with the model is not recorded as an intervention")
 
     # --- garbage input leaves the verdict alone
-    pipe._ask = lambda _p: "asdf"
+    pipe._ask = lambda *_a, **_k: "asdf"
     v = pipe.review_verify({"decision": "done"})
     assert v["decision"] == "done" and "operator_override" not in v
     ok("unrecognised input leaves the model verdict untouched")
@@ -544,7 +547,7 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     if out.exists():
         shutil.rmtree(out)
     run = Pipeline(cfg, out, notes=note, interactive=True)
-    run._ask = lambda p: "revert" if "판정" in p else ""
+    run._ask = lambda p, *_a, **_k: "revert" if "판정" in p else ""
     summary = run.build(src)
     assert summary["operator_notes"] == note
     assert summary["operator_interventions"] >= 1, summary
@@ -587,7 +590,7 @@ def test_human_verify(llm_base: str, renderer_url: str) -> None:
     original = pipe.llm.chat
     pipe.llm.chat = lambda messages, **kw: (stages.append(kw.get("stage", "?")), original(messages, **kw))[1]
     answers = iter(["keep", "제목 크기가 맞았다", "표 우측 정렬이 남았다"])
-    pipe._input = staticmethod(lambda _p: next(answers, ""))
+    pipe._input = lambda *_a, **_k: next(answers, "")
 
     summary = pipe.build(make_source_png(Path("tmp/source_fixture.png")))
 
@@ -614,7 +617,7 @@ def test_human_verify(llm_base: str, renderer_url: str) -> None:
 
     # An unusable verdict must never adopt the edit.
     pipe2 = Pipeline(cfg, out, verify_mode="human")
-    pipe2._input = staticmethod(lambda _p: "")
+    pipe2._input = lambda *_a, **_k: ""
     v = pipe2.human_verify({"goal": "g"}, out / "rounds" / "r01" / "compare.png")
     assert v["decision"] == "revert", v
     ok("no usable operator input defaults to revert, never keep")
@@ -623,6 +626,112 @@ def test_human_verify(llm_base: str, renderer_url: str) -> None:
     block = prompts.history_block(["Round 1: g -> keep (operator: 표 우측 정렬이 남았다)"])
     assert "표 우측 정렬이 남았다" in block
     ok("operator's comment is carried into the next PLAN's history")
+
+
+
+
+
+# ------------------------------------------------- 11. UI and region marking
+
+def test_ui_and_region() -> None:
+    print("[11] review UI and region marking")
+    import urllib.error
+    import urllib.request
+
+    from pipeline import Pipeline
+    from ui import ReviewServer
+
+    out = ROOT / "out" / "ui_probe"
+    utils.ensure_dir(out / "rounds" / "r01")
+    sheet, panels = utils.side_by_side(
+        [("1. SOURCE", str(make_source_png(Path("tmp/source_fixture.png")))),
+         ("2. CURRENT RENDER", str(make_source_png(Path("tmp/source_fixture.png"))))],
+        out / "rounds" / "r01" / "plan_view.png",
+    )
+    assert [p["label"] for p in panels] == ["1. SOURCE", "2. CURRENT RENDER"]
+    assert panels[1]["x"] > panels[0]["width"], panels
+    ok(f"side_by_side reports panel boxes a UI can map clicks to: {panels[0]}")
+
+    server = ReviewServer(out, port=0, timeout=20)
+    url = server.start()
+    try:
+        # Path traversal must not escape the run directory.
+        assert server.read_image("../../../etc/passwd") is None
+        assert server.read_image("rounds/r01/plan_view.png") is not None
+        assert server.read_image("summary.json") is None  # PNG only
+        ok("UI serves PNGs from the run directory only")
+
+        # A question is published, answered over HTTP, and the region survives.
+        answered: dict = {}
+
+        def ask():
+            answered["text"] = server.ask(
+                "개입: ",
+                {"stage": "PLAN", "round": 1, "image": str(sheet), "image_panels": panels},
+            )
+            answered["region"] = server.last_region
+
+        thread = threading.Thread(target=ask, daemon=True)
+        thread.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and not (json.loads(
+                urllib.request.urlopen(f"{url}state").read())["pending"]):
+            time.sleep(0.1)
+        state = json.loads(urllib.request.urlopen(f"{url}state").read())
+        assert state["pending"]["image"] == "rounds/r01/plan_view.png", state["pending"]
+        assert state["pending"]["panels"] == panels
+        ok("pending question exposes the image path and panel boxes")
+
+        req = urllib.request.Request(
+            f"{url}answer",
+            data=json.dumps({"answer": "o 이 표만 고쳐라",
+                             "region": {"panel": "1. SOURCE", "x": 0.05, "y": 0.1,
+                                        "w": 0.9, "h": 0.25}}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        assert json.loads(urllib.request.urlopen(req).read())["ok"] is True
+        thread.join(timeout=10)
+        assert answered["text"] == "o 이 표만 고쳐라", answered
+        assert answered["region"]["w"] == 0.9, answered
+        ok("answer and marked region both reach the pipeline")
+
+        for bad in ({"x": 2, "y": 0, "w": 1, "h": 1}, {"x": 0, "y": 0, "w": 0, "h": 1},
+                    {"x": "a", "y": 0, "w": 1, "h": 1}, "nope", None):
+            assert ReviewServer._clean_region(bad) is None, bad
+        ok("out-of-range or malformed regions are dropped, not trusted")
+    finally:
+        server.stop()
+
+    # A marked region becomes real zoomed crops on the ACTION call.
+    region = {"panel": "1. SOURCE", "x": 0.05, "y": 0.1, "w": 0.9, "h": 0.25}
+    src = make_source_png(Path("tmp/source_fixture.png"))
+    crop = utils.crop_normalized(src, region)
+    full_w, full_h = utils.image_size(src)
+    crop_w, crop_h = utils.image_size(crop)
+    assert crop_w < full_w and crop_h < full_h, (crop_w, crop_h, full_w, full_h)
+    ok(f"crop_normalized zooms {full_w}x{full_h} down to {crop_w}x{crop_h}")
+
+    # The same normalised rect works on a differently sized image.
+    from PIL import Image
+    small = io.BytesIO()
+    Image.open(str(src)).resize((400, 280)).save(small, format="PNG")
+    sw, sh = utils.image_size(utils.crop_normalized(small.getvalue(), region))
+    assert abs(sw / 400 - crop_w / full_w) < 0.05, (sw, crop_w)
+    ok("the same rect crops proportionally on a different-sized image")
+
+    assert "operator_region" in prompts.operator_contract_block(True)
+    block = prompts.region_block(region)
+    assert "Leave the rest of the document alone" in block and "0.9" in block
+    ok("ACTION is told the last two images are the marked region")
+
+    cfg = load_config()
+    pipe = Pipeline(cfg, out, interactive=True)
+    pipe._last_region = region
+    pipe._ask = lambda *_a, **_k: "o 이 표만 고쳐라"
+    plan = pipe.review_plan({"scope": "local", "goal": "g"})
+    assert plan["operator_region"] == region, plan
+    ok("the region is stored on the plan, so ACTION receives it")
 
 
 
@@ -641,6 +750,7 @@ def main() -> int:
     test_patch_artifacts()
     test_operator(llm_base, renderer_url)
     test_human_verify(llm_base, renderer_url)
+    test_ui_and_region()
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

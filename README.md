@@ -116,10 +116,56 @@ out/sample/
 
 ## 사람이 개입하기 (선택)
 
+가장 쉬운 방법은 웹 UI다. 터미널만 쓰는 방법은 그 아래에 있다.
+
+### 웹 UI
+
+```bash
+python run.py build sample.png --ui
+```
+
+로컬 주소가 출력되니 브라우저로 열어둔다. `--ui` 를 켜면 **기본적으로 사람 의견을
+받는다** (PLAN·VERIFY 양쪽). 판단 조합은 이렇게 된다.
+
+| 하는 일 | 결과 |
+| --- | --- |
+| 그냥 수락 버튼 | Qwen 판단만 사용 |
+| 의견을 적고 첨부 | Qwen 판단 + 사람 의견 |
+| `--verify human` 을 함께 지정 | VERIFY에 Qwen을 호출하지 않고 사람 판단만 사용 |
+
+화면에 나오는 것:
+
+* **비교 이미지** — PLAN에서는 원본 · 현재 렌더, VERIFY에서는 원본 · 수정 전 ·
+  수정 후
+* 모델이 낸 PLAN 또는 VERIFY JSON 원문
+* 의견 입력창과 버튼 (수락 / 의견 첨부 / 교체 / 건너뛰기)
+* 지난 라운드에 무엇을 보냈는지
+
+UI는 표준 라이브러리만 쓴다. 서버 프레임워크를 새로 깔지 않는다. 브라우저가
+입력을 대신 주므로 터미널이 없어도 되고, `--ui-timeout` (기본 1800초) 안에 답이
+없으면 입력 없음으로 처리한다.
+
+### 영역만 지정해서 고치기
+
+UI의 이미지 위를 **드래그하면 그 영역만 고치라고 지정**할 수 있다.
+
+```
+선택 영역: 1. SOURCE  x 10%, y 14%, 폭 79%, 높이 28%
+```
+
+지정하면 그 라운드의 ACTION 호출에 **그 영역을 확대한 crop 두 장**(원본의 그
+영역, 현재 렌더의 그 영역)이 이미지로 추가되고, 프롬프트에 "이 crop이 보여주는
+것만 고치고 문서의 나머지는 건드리지 말라"가 함께 들어간다. 좌표는 패널 기준
+비율(0~1)로 저장되므로 원본 스캔이 2480px이고 렌더가 800px여도 같은 영역을
+가리킨다.
+
+`plan.json` 에 `operator_region` 으로 남는다. 범위를 벗어나거나 형식이 잘못된
+좌표는 저장하지 않고 버린다.
+
 PLAN이 엉뚱한 것을 우선순위로 집거나, VERIFY가 자기가 한 수정에 관대할 때 쓴다.
 둘 다 옵션이고 기본값은 꺼져 있다.
 
-### 운영자 메모 — 배치 실행에서도 쓸 수 있다
+### 운영자 메모 — 배치 실행에서도 쓸 수 있다 (UI 없이)
 
 ```bash
 python run.py build sample.png --note "표 정렬이 이 문서에서 가장 중요하다"
@@ -238,7 +284,8 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 이게 중요하다. 사람이 구해준 것과 모델이 스스로 한 것을 구분하지 못하면
 "Qwen이 이 작업을 할 수 있나"라는 판단이 오염된다.
 
-* `plan.json`의 `planned_by`: `model` / `model+operator`.
+* `plan.json`의 `planned_by`: `model` / `model+operator`, 영역을 지정했다면
+  `operator_region`.
 * `verify.json`의 `verified_by`: `model` / `operator` / `model+operator`.
 * 뒤집기와 첨부는 남는 필드로 구분된다. 뒤집기는 `operator_instruction`(PLAN)
   또는 `operator_override`(VERIFY), 첨부는 양쪽 다 `operator_note`.
@@ -334,6 +381,7 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | 파일 | 역할 |
 | --- | --- |
 | `run.py` | CLI: `doctor`, `render`, `build` |
+| `ui.py` | 로컬 검토 UI (표준 라이브러리만). 질문을 띄우고 답을 기다린다 |
 | `config.py` | `config.toml` 로딩 |
 | `llm.py` | Qwen client (표준 `urllib`), message/image helper |
 | `renderer.py` | `/health` + `/probe` client와 probe script |

@@ -17,6 +17,7 @@ from utils import (
     ensure_dir,
     extract_json,
     html_sanity_check,
+    crop_normalized,
     image_size,
     side_by_side,
     truncate,
@@ -65,6 +66,7 @@ class Pipeline:
         notes: str = "",
         interactive: bool = False,
         verify_mode: str | None = None,
+        prompter=None,
     ) -> None:
         # Asking to intervene implies intervening at VERIFY too, unless the
         # caller names a mode. Keeps the library and the CLI in agreement.
@@ -79,6 +81,10 @@ class Pipeline:
         # Whether a person can actually intervene in this run. Gates the
         # contract block so the default path's prompts stay unchanged.
         self.operator_active = interactive or verify_mode != "model"
+        # Anything with .ask(prompt, context) -> str. None means the terminal.
+        self.prompter = prompter
+        # Region the operator marked alongside their last answer, if any.
+        self._last_region: dict | None = None
         self.interventions = 0
         self.llm = QwenClient(cfg.llm)
         self.renderer = RendererClient(
@@ -195,13 +201,22 @@ class Pipeline:
         contract = prompts.operator_contract_block(self.operator_active)
         if contract:
             text = f"{text}\n\n{contract}"
+
+        parts = [self._img(source_png), self._img(current_png)]
+        region = plan.get("operator_region")
+        if isinstance(region, dict):
+            # Zoomed crops of the marked area: the same normalised rect applies
+            # to the source and the render even at different pixel sizes.
+            try:
+                parts.append(self._img(crop_normalized(source_png, region)))
+                parts.append(self._img(crop_normalized(current_png, region)))
+                text = f"{text}\n\n{prompts.region_block(region)}"
+                LOG.info("ACTION: operator region attached as crops %s", region)
+            except (OSError, ValueError) as exc:
+                LOG.warning("ACTION: could not crop the operator region: %s", exc)
         messages = [
             system_message(prompts.ACTION_SYSTEM),
-            user_message(
-                text,
-                self._img(source_png),
-                self._img(current_png),
-            ),
+            user_message(text, *parts),
         ]
         LOG.info("ACTION: mode=%s (scope=%s)", mode, plan.get("scope", "?"))
         return mode, self.llm.chat(messages, thinking=False, stage=f"action:{mode}")
@@ -263,27 +278,28 @@ class Pipeline:
 
     # -------------------------------------------------------- operator input
 
-    @staticmethod
-    def _input(prompt: str) -> str:
+    def _input(self, prompt: str, context: dict | None = None) -> str:
         """Always reads. Used where a human verdict is the only source of truth."""
+        self._last_region = None
+        if self.prompter is not None:
+            text = self.prompter.ask(prompt, context or {})
+            self._last_region = getattr(self.prompter, "last_region", None)
+            return text.strip()
         try:
             return input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             return ""
 
-    def _ask(self, prompt: str) -> str:
+    def _ask(self, prompt: str, context: dict | None = None) -> str:
         if not self.interactive:
             return ""
-        try:
-            return input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            return ""
+        return self._input(prompt, context)
 
     PLAN_PROMPT = (
         "개입 (Enter=수락 / a <의견>=의견 첨부 / o <지시>=계획 교체 / s=건너뛰기): "
     )
 
-    def review_plan(self, plan: dict) -> dict:
+    def review_plan(self, plan: dict, context: dict | None = None) -> dict:
         """Let the operator amend or replace the plan before ACTION acts on it."""
         plan.setdefault("planned_by", "model")
         if not self.interactive:
@@ -291,8 +307,24 @@ class Pipeline:
         print("\n--- PLAN ---")
         print(json.dumps(plan, ensure_ascii=False, indent=2))
 
+        ctx = {
+            "stage": "PLAN",
+            "round": (context or {}).get("round", ""),
+            "title": f"PLAN — 라운드 {(context or {}).get('round', '?')}",
+            "data": plan,
+            "image": (context or {}).get("image"),
+            "image_panels": (context or {}).get("image_panels") or [],
+            "text": True,
+            "enter_value": "a @text",
+            "choices": [
+                {"label": "계획 수락", "value": "", "style": "primary"},
+                {"label": "의견 첨부", "value": "a @text"},
+                {"label": "계획 교체", "value": "o @text"},
+                {"label": "라운드 건너뛰기", "value": "s", "style": "warn"},
+            ],
+        }
         for attempt in range(3):
-            answer = self._ask(self.PLAN_PROMPT)
+            answer = self._ask(self.PLAN_PROMPT, ctx)
             if not answer:
                 return plan
             head, _, rest = answer.partition(" ")
@@ -317,6 +349,9 @@ class Pipeline:
                 else:
                     plan["operator_note"] = rest
                     LOG.info("PLAN: operator attached a note")
+                if self._last_region:
+                    plan["operator_region"] = self._last_region
+                    LOG.info("PLAN: operator marked a region %s", self._last_region)
                 plan["planned_by"] = "model+operator"
                 self.interventions += 1
                 return plan
@@ -329,15 +364,32 @@ class Pipeline:
         "개입 (Enter=수락 / a <의견>=의견 첨부 / keep|revert|done=판정 교체): "
     )
 
-    def review_verify(self, verdict: dict) -> dict:
+    def review_verify(self, verdict: dict, context: dict | None = None) -> dict:
         """Let the operator attach an opinion to, or overrule, the model's verdict."""
         if not self.interactive:
             return verdict
         print("\n--- VERIFY ---")
         print(json.dumps(verdict, ensure_ascii=False, indent=2))
 
+        ctx = {
+            "stage": "VERIFY",
+            "round": (context or {}).get("round", ""),
+            "title": f"VERIFY — 라운드 {(context or {}).get('round', '?')}"
+                     f" · 모델 판정: {verdict.get('decision', '?')}",
+            "data": verdict,
+            "image": (context or {}).get("image"),
+            "image_panels": (context or {}).get("image_panels") or [],
+            "text": True,
+            "choices": [
+                {"label": "모델 판정 수락", "value": "", "style": "primary"},
+                {"label": "의견 첨부", "value": "a @text"},
+                {"label": "keep 으로 교체", "value": "keep"},
+                {"label": "revert 로 교체", "value": "revert", "style": "warn"},
+                {"label": "done 으로 교체", "value": "done"},
+            ],
+        }
         for attempt in range(3):
-            answer = self._ask(self.VERIFY_PROMPT)
+            answer = self._ask(self.VERIFY_PROMPT, ctx)
             if not answer:
                 return verdict
             head, _, rest = answer.partition(" ")
@@ -350,6 +402,8 @@ class Pipeline:
                     continue
                 # The decision stands; the comment travels to the next PLAN.
                 verdict["operator_note"] = rest
+                if self._last_region:
+                    verdict["operator_region"] = self._last_region
                 verdict["verified_by"] = "model+operator"
                 self.interventions += 1
                 LOG.info("VERIFY: operator attached a note, decision unchanged")
@@ -371,15 +425,35 @@ class Pipeline:
                 print("입력을 이해하지 못했습니다. 모델 판정을 그대로 둡니다.")
         return verdict
 
-    def human_verify(self, plan: dict, compare_path: Path) -> dict:
+    def human_verify(self, plan: dict, compare_path: Path, round_index=None, panels=None) -> dict:
         """The operator is the verifier: no VERIFY call is made to the model."""
         print("\n--- VERIFY (사람 판정) ---")
         print(f"비교 이미지: {compare_path}")
-        print(f"이번 라운드 목표: {plan.get('goal', '') or plan.get('target', '')}")
+        goal = plan.get("goal", "") or plan.get("target", "")
+        print(f"이번 라운드 목표: {goal}")
 
+        base = {
+            "stage": "VERIFY",
+            "round": round_index if round_index is not None else "",
+            "image": str(compare_path),
+            "image_panels": panels or [],
+            "data": {"goal": goal, "plan": plan},
+        }
         decision = ""
         for _ in range(3):
-            answer = self._input("판정 (keep=반영 / revert=되돌림 / done=완료): ").lower()
+            answer = self._input(
+                "판정 (keep=반영 / revert=되돌림 / done=완료): ",
+                dict(
+                    base,
+                    title=f"VERIFY (사람 판정) — 라운드 {base['round']}",
+                    text=False,
+                    choices=[
+                        {"label": "keep (반영)", "value": "keep", "style": "primary"},
+                        {"label": "revert (되돌림)", "value": "revert", "style": "warn"},
+                        {"label": "done (완료)", "value": "done"},
+                    ],
+                ),
+            ).lower()
             if answer in ("keep", "revert", "done"):
                 decision = answer
                 break
@@ -389,8 +463,18 @@ class Pipeline:
             LOG.warning("VERIFY: no usable operator verdict; defaulting to revert")
             decision = "revert"
 
-        reason = self._input("이유 (선택, Enter=생략): ")
-        next_issue = self._input("다음에 고칠 것 (선택, Enter=생략): ")
+        reason = self._input(
+            "이유 (선택, Enter=생략): ",
+            dict(base, title="이유 (선택)", text=True, enter_value="@text",
+                 choices=[{"label": "생략", "value": ""},
+                          {"label": "입력한 이유 전송", "value": "@text", "style": "primary"}]),
+        )
+        next_issue = self._input(
+            "다음에 고칠 것 (선택, Enter=생략): ",
+            dict(base, title="다음에 고칠 것 (선택)", text=True, enter_value="@text",
+                 choices=[{"label": "생략", "value": ""},
+                          {"label": "입력한 내용 전송", "value": "@text", "style": "primary"}]),
+        )
         self.interventions += 1
         LOG.info("VERIFY: operator decided %s", decision)
         return {
@@ -423,7 +507,18 @@ class Pipeline:
             # PLAN
             try:
                 plan = self.plan(source_png, current_png, history)
-                plan = self.review_plan(plan)
+                if self.interactive:
+                    # Source next to the current render: what PLAN itself saw.
+                    plan_view, plan_panels = side_by_side(
+                        [("1. SOURCE", str(source_png)), ("2. CURRENT RENDER", current_png)],
+                        rdir / "plan_view.png",
+                    )
+                    plan = self.review_plan(
+                        plan,
+                        {"round": index, "image": str(plan_view), "image_panels": plan_panels},
+                    )
+                else:
+                    plan = self.review_plan(plan)
             except SkipRound as exc:
                 LOG.info("round %d: %s", index, exc)
                 results.append(RoundResult(index, "skipped", operator=True))
@@ -489,7 +584,7 @@ class Pipeline:
             write_json(rdir / "metrics.json", metrics)
 
             # One image a person can actually judge from.
-            compare_path = side_by_side(
+            compare_path, compare_panels = side_by_side(
                 [
                     ("1. SOURCE", str(source_png)),
                     ("2. BEFORE", current_png),
@@ -501,12 +596,21 @@ class Pipeline:
             # VERIFY
             try:
                 if self.verify_mode == "human":
-                    verdict = self.human_verify(plan, compare_path)
+                    verdict = self.human_verify(
+                        plan, compare_path, round_index=index, panels=compare_panels
+                    )
                 else:
                     verdict = self.verify(plan, source_png, current_png, candidate_png)
                     verdict["verified_by"] = "model"
                     if self.verify_mode == "both":
-                        verdict = self.review_verify(verdict)
+                        verdict = self.review_verify(
+                            verdict,
+                            {
+                                "round": index,
+                                "image": str(compare_path),
+                                "image_panels": compare_panels,
+                            },
+                        )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
                 results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=(plan.get("planned_by") == "model+operator")))
