@@ -137,6 +137,7 @@ Return JSON only:
 OPERATOR_CONTRACT = """A human operator is taking part in this loop, so some of the input you get is written by a person, not by you:
 - "operator_instruction" in the plan: a human instruction that REPLACES the plan's own goal. Do what it says instead.
 - "operator_note" in the plan: a human comment to take into account WITHOUT discarding the plan.
+- a plan with "planned_by": "operator": the human discarded the model's own plan. What the model had proposed is kept under "model_plan" for reference only - do not act on it.
 - "operator_region" in the plan: a human marked one area of the page. Confine the edit to it; two extra images zoom in on that area.
 - a history line marked (operator: ...): a human comment on an earlier round.
 The operator is looking at the same images you are. Prefer their input over your own earlier reasoning, but never over what the current images plainly show. If their input contradicts the images, say so rather than following it blindly."""

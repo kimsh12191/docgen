@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -116,6 +117,8 @@ function render(st){
       (p.panels && p.panels.length
         ? '이미지 위를 드래그하면 그 영역만 고치라고 지정할 수 있습니다.'
         : '') + `</div>`;
+  if (p.image2) html += `<div class="stage" style="font-size:14px">${esc(p.image2_label || '확대 보기')}</div>` +
+      `<img src="img?p=${encodeURIComponent(p.image2)}&v=${esc(p.id)}" alt="" style="cursor:default">`;
   if (p.data)  html += `<pre>${esc(JSON.stringify(p.data, null, 2))}</pre>`;
   html += `<div>${esc(p.prompt)}</div>`;
   if (p.text) html += `<div class="row"><input type="text" id="txt" placeholder="의견 / 지시를 입력"></div>`;
@@ -215,6 +218,22 @@ tick(); setInterval(tick, 1000);
 """
 
 
+def lan_ip() -> str:
+    """Best-effort address of this host on its own network."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # No packets are sent; this only picks the outbound interface.
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "127.0.0.1"
+    finally:
+        sock.close()
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "docgen-ui"
@@ -272,8 +291,15 @@ class _Handler(BaseHTTPRequestHandler):
 class ReviewServer:
     """Serves one question at a time and blocks the pipeline until it is answered."""
 
-    def __init__(self, out_dir: str | Path, port: int = 0, timeout: int = 1800) -> None:
+    def __init__(
+        self,
+        out_dir: str | Path,
+        port: int = 0,
+        timeout: int = 1800,
+        host: str = "127.0.0.1",
+    ) -> None:
         self.out_dir = Path(out_dir).resolve()
+        self.host = host
         self.port = port
         self.timeout = timeout
         self._httpd: ThreadingHTTPServer | None = None
@@ -290,11 +316,15 @@ class ReviewServer:
     # ------------------------------------------------------------ lifecycle
 
     def start(self) -> str:
-        httpd = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
+        httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
         httpd.review = self  # type: ignore[attr-defined]
         self._httpd = httpd
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        return f"http://127.0.0.1:{httpd.server_address[1]}/"
+        bound = httpd.server_address[1]
+        # When bound to every interface, print an address another machine can
+        # actually reach -- 0.0.0.0 is not usable in a browser.
+        shown = lan_ip() if self.host in ("", "0.0.0.0", "::") else self.host
+        return f"http://{shown}:{bound}/"
 
     def stop(self) -> None:
         self.finished = True
@@ -371,13 +401,16 @@ class ReviewServer:
     def ask(self, prompt: str, context: dict | None = None) -> str:
         """Publish a question and block until the browser answers or time runs out."""
         context = context or {}
-        image = context.get("image")
-        rel = ""
-        if image:
+        def relative(value) -> str:
+            if not value:
+                return ""
             try:
-                rel = str(Path(image).resolve().relative_to(self.out_dir))
+                return str(Path(value).resolve().relative_to(self.out_dir))
             except (ValueError, OSError):
-                rel = ""
+                return ""
+
+        rel = relative(context.get("image"))
+        rel2 = relative(context.get("image2"))
 
         with self._lock:
             self._counter += 1
@@ -393,6 +426,8 @@ class ReviewServer:
                 "prompt": prompt,
                 "data": context.get("data"),
                 "image": rel,
+                "image2": rel2,
+                "image2_label": context.get("image2_label") or "",
                 "panels": context.get("image_panels") or [],
                 "choices": context.get("choices", []),
                 "text": bool(context.get("text", True)),

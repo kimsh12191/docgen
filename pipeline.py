@@ -296,7 +296,8 @@ class Pipeline:
         return self._input(prompt, context)
 
     PLAN_PROMPT = (
-        "개입 (Enter=수락 / a <의견>=의견 첨부 / o <지시>=계획 교체 / s=건너뛰기): "
+        "개입 (Enter=수락 / a <의견>=첨언 / o <지시>=계획 교체 / "
+        "x <지시>=Qwen 계획 버리고 사람 의견만 / s=건너뛰기): "
     )
 
     def review_plan(self, plan: dict, context: dict | None = None) -> dict:
@@ -314,12 +315,15 @@ class Pipeline:
             "data": plan,
             "image": (context or {}).get("image"),
             "image_panels": (context or {}).get("image_panels") or [],
+            "image2": (context or {}).get("image2"),
+            "image2_label": (context or {}).get("image2_label", ""),
             "text": True,
             "enter_value": "a @text",
             "choices": [
                 {"label": "계획 수락", "value": "", "style": "primary"},
-                {"label": "의견 첨부", "value": "a @text"},
+                {"label": "의견 첨부 (Qwen + 사람)", "value": "a @text"},
                 {"label": "계획 교체", "value": "o @text"},
+                {"label": "Qwen 계획 버리고 사람 의견만", "value": "x @text"},
                 {"label": "라운드 건너뛰기", "value": "s", "style": "warn"},
             ],
         }
@@ -338,24 +342,48 @@ class Pipeline:
                 # be injected into the plan as a nonsense instruction.
                 print(f"'{answer}' 는 VERIFY 판정어입니다. 여기는 PLAN 단계입니다.")
                 continue
-            if head in ("a", "o"):
+            if head in ("a", "o", "x"):
                 if not rest:
                     print(f"'{head}' 뒤에 내용을 함께 적어주세요.")
                     continue
-                if head == "o":
+                if head == "x":
+                    # The model's plan is discarded outright. It is kept under
+                    # model_plan so the record still shows what Qwen proposed.
+                    model_plan = {
+                        k: v for k, v in plan.items()
+                        if k not in ("planned_by", "operator_instruction",
+                                     "operator_note", "operator_region", "model_plan")
+                    }
+                    scope = plan.get("scope", "local")
+                    plan.clear()
+                    plan.update(
+                        {
+                            "scope": scope,
+                            "target": "operator instruction",
+                            "problem": rest,
+                            "cause": "",
+                            "goal": rest,
+                            "operator_instruction": rest,
+                            "model_plan": model_plan,
+                            "planned_by": "operator",
+                        }
+                    )
+                    LOG.info("PLAN: operator discarded the model plan")
+                elif head == "o":
                     # ACTION is told this replaces the plan's own goal.
                     plan["operator_instruction"] = rest
+                    plan["planned_by"] = "model+operator"
                     LOG.info("PLAN: operator replaced the goal")
                 else:
                     plan["operator_note"] = rest
+                    plan["planned_by"] = "model+operator"
                     LOG.info("PLAN: operator attached a note")
                 if self._last_region:
                     plan["operator_region"] = self._last_region
                     LOG.info("PLAN: operator marked a region %s", self._last_region)
-                plan["planned_by"] = "model+operator"
                 self.interventions += 1
                 return plan
-            print("a(의견 첨부) / o(계획 교체) / s(건너뛰기) 중에서 골라주세요.")
+            print("a(첨언) / o(계획 교체) / x(사람 의견만) / s(건너뛰기) 중에서 골라주세요.")
             if attempt == 2:
                 print("입력을 이해하지 못했습니다. 계획을 그대로 수락합니다.")
         return plan
@@ -379,6 +407,8 @@ class Pipeline:
             "data": verdict,
             "image": (context or {}).get("image"),
             "image_panels": (context or {}).get("image_panels") or [],
+            "image2": (context or {}).get("image2"),
+            "image2_label": (context or {}).get("image2_label", ""),
             "text": True,
             "choices": [
                 {"label": "모델 판정 수락", "value": "", "style": "primary"},
@@ -425,7 +455,14 @@ class Pipeline:
                 print("입력을 이해하지 못했습니다. 모델 판정을 그대로 둡니다.")
         return verdict
 
-    def human_verify(self, plan: dict, compare_path: Path, round_index=None, panels=None) -> dict:
+    def human_verify(
+        self,
+        plan: dict,
+        compare_path: Path,
+        round_index=None,
+        panels=None,
+        region_compare=None,
+    ) -> dict:
         """The operator is the verifier: no VERIFY call is made to the model."""
         print("\n--- VERIFY (사람 판정) ---")
         print(f"비교 이미지: {compare_path}")
@@ -437,6 +474,8 @@ class Pipeline:
             "round": round_index if round_index is not None else "",
             "image": str(compare_path),
             "image_panels": panels or [],
+            "image2": str(region_compare) if region_compare else None,
+            "image2_label": "지정한 영역 (수정 전 → 후)",
             "data": {"goal": goal, "plan": plan},
         }
         decision = ""
@@ -537,7 +576,7 @@ class Pipeline:
                 action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
-                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=(plan.get("planned_by") == "model+operator")))
+                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=plan.get("planned_by", "model") != "model"))
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
@@ -559,7 +598,7 @@ class Pipeline:
                 candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=(plan.get("planned_by") == "model+operator")))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=plan.get("planned_by", "model") != "model"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (invalid HTML)")
                 write_json(rdir / "error.json", {"stage": "apply", "error": str(exc)})
                 continue
@@ -567,7 +606,7 @@ class Pipeline:
 
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
-                results.append(RoundResult(index, "noop", mode=mode, plan=plan, operator=(plan.get("planned_by") == "model+operator")))
+                results.append(RoundResult(index, "noop", mode=mode, plan=plan, operator=plan.get("planned_by", "model") != "model"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> no change produced")
                 continue
 
@@ -576,7 +615,7 @@ class Pipeline:
                 candidate_png, metrics = self.render(candidate_html)
             except RendererError as exc:
                 LOG.warning("round %d: candidate failed to render: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=(plan.get("planned_by") == "model+operator")))
+                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=plan.get("planned_by", "model") != "model"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (render failed)")
                 write_json(rdir / "error.json", {"stage": "render", "error": str(exc)})
                 continue
@@ -593,11 +632,32 @@ class Pipeline:
                 rdir / "compare.png",
             )
 
+            # When the operator marked a region, a full-page comparison is too
+            # coarse to show whether that area actually changed.
+            region_compare = None
+            region = plan.get("operator_region")
+            if isinstance(region, dict):
+                try:
+                    region_compare, _ = side_by_side(
+                        [
+                            ("1. SOURCE (region)", crop_normalized(source_png, region)),
+                            ("2. BEFORE (region)", crop_normalized(current_png, region)),
+                            ("3. AFTER (region)", crop_normalized(candidate_png, region)),
+                        ],
+                        rdir / "compare_region.png",
+                    )
+                except (OSError, ValueError) as exc:
+                    LOG.warning("could not build the region comparison: %s", exc)
+
             # VERIFY
             try:
                 if self.verify_mode == "human":
                     verdict = self.human_verify(
-                        plan, compare_path, round_index=index, panels=compare_panels
+                        plan,
+                        compare_path,
+                        round_index=index,
+                        panels=compare_panels,
+                        region_compare=region_compare,
                     )
                 else:
                     verdict = self.verify(plan, source_png, current_png, candidate_png)
@@ -609,11 +669,13 @@ class Pipeline:
                                 "round": index,
                                 "image": str(compare_path),
                                 "image_panels": compare_panels,
+                                "image2": str(region_compare) if region_compare else None,
+                                "image2_label": "지정한 영역 (수정 전 → 후)",
                             },
                         )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
-                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=(plan.get("planned_by") == "model+operator")))
+                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=plan.get("planned_by", "model") != "model"))
                 write_json(rdir / "error.json", {"stage": "verify", "error": str(exc)})
                 continue
             write_json(rdir / "verify.json", verdict)
@@ -631,7 +693,7 @@ class Pipeline:
                         verdict.get("operator_override")
                         or verdict.get("operator_note")
                         or verdict.get("verified_by") in ("operator", "model+operator")
-                        or plan.get("planned_by") == "model+operator"
+                        or plan.get("planned_by", "model") != "model"
                     ),
                     plan=plan,
                     verify=verdict,

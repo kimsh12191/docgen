@@ -222,10 +222,15 @@ def cmd_build(args, cfg) -> int:
     if args.ui:
         from ui import ReviewServer
 
-        server = ReviewServer(out_dir, port=args.ui_port, timeout=args.ui_timeout)
+        server = ReviewServer(
+            out_dir, port=args.ui_port, timeout=args.ui_timeout, host=args.ui_host
+        )
         url = server.start()
         prompter = server
         print(f"검토 UI: {url}  (브라우저에서 열어두세요)")
+        if args.ui_host not in ("127.0.0.1", "localhost"):
+            print("  주의: 이 주소는 같은 네트워크의 다른 PC에서도 열립니다. "
+                  "인증이 없으니 사내망에서만 쓰세요")
 
     try:
         summary = Pipeline(
@@ -309,6 +314,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="로컬 웹 UI로 개입한다. 비교 이미지를 보면서 버튼으로 판정한다",
     )
     build.add_argument("--ui-port", type=int, default=0, help="UI 포트 (기본: 임의 포트)")
+    build.add_argument(
+        "--ui-host",
+        default="127.0.0.1",
+        help="UI 바인딩 주소. 다른 PC(예: 윈도우)에서 접속하려면 0.0.0.0",
+    )
     build.add_argument(
         "--ui-timeout",
         type=int,

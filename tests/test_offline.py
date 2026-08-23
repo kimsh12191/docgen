@@ -735,6 +735,106 @@ def test_ui_and_region() -> None:
 
 
 
+
+
+# ------------------------- 12. operator-only plan, LAN binding, region round-trip
+
+def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None:
+    print("[12] operator-only plan, LAN binding, region round trip")
+    import shutil
+
+    from pipeline import Pipeline
+    from ui import ReviewServer, lan_ip
+
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+
+    # --- 'x' discards the model's plan outright
+    pipe = Pipeline(cfg, ROOT / "out" / "x_probe", interactive=True)
+    pipe._ask = lambda *_a, **_k: "x 표 컬럼 폭만 원본에 맞춰라"
+    plan = pipe.review_plan(
+        {"scope": "local", "target": "t", "problem": "p", "cause": "c", "goal": "모델 목표"}
+    )
+    assert plan["planned_by"] == "operator", plan
+    assert plan["goal"] == "표 컬럼 폭만 원본에 맞춰라", plan
+    assert plan["model_plan"]["goal"] == "모델 목표", plan
+    assert "모델 목표" not in json.dumps(
+        {k: v for k, v in plan.items() if k != "model_plan"}, ensure_ascii=False
+    ), "the discarded plan must not leak back into the acted-on fields"
+    ok("PLAN 'x' discards the model plan, keeping it only under model_plan")
+
+    assert "planned_by" in prompts.operator_contract_block(True)
+    ok("ACTION is told a plan may be the operator's alone")
+
+    # --- the UI can bind somewhere another machine can reach
+    ip = lan_ip()
+    assert ip and ip.count(".") == 3, ip
+    local = ReviewServer(ROOT / "out", port=0)
+    url_local = local.start()
+    local.stop()
+    wide = ReviewServer(ROOT / "out", port=0, host="0.0.0.0")
+    url_wide = wide.start()
+    wide.stop()
+    assert "127.0.0.1" in url_local, url_local
+    assert "0.0.0.0" not in url_wide and ip in url_wide, url_wide
+    ok(f"host=0.0.0.0 advertises a reachable address ({url_wide.strip('/')})")
+
+    # --- a marked region drives one full round and comes back zoomed
+    class FakePrompter:
+        """Marks a region and hands over an operator-only instruction."""
+
+        last_region = {"panel": "1. SOURCE", "x": 0.05, "y": 0.12, "w": 0.9, "h": 0.24}
+
+        def __init__(self):
+            self.seen: list[dict] = []
+
+        def ask(self, prompt, context):
+            self.seen.append(context)
+            return "x 이 표만 원본에 맞춰라" if context.get("stage") == "PLAN" else ""
+
+    mock_services.LLMHandler.plan_calls = 0
+    out = ROOT / "out" / "region_loop"
+    if out.exists():
+        shutil.rmtree(out)
+    prompter = FakePrompter()
+    pipe2 = Pipeline(cfg, out, interactive=True, verify_mode="both", prompter=prompter)
+    images: list[int] = []
+    original = pipe2.llm.chat
+
+    def spy(messages, **kw):
+        if str(kw.get("stage", "")).startswith("action"):
+            images.append(sum(1 for c in messages[-1]["content"] if c["type"] == "image_url"))
+        return original(messages, **kw)
+
+    pipe2.llm.chat = spy
+    summary = pipe2.build(make_source_png(Path("tmp/source_fixture.png")))
+
+    saved = json.loads((out / "rounds" / "r01" / "plan.json").read_text())
+    assert saved["operator_region"]["w"] == 0.9, saved
+    assert saved["planned_by"] == "operator", saved
+    ok("the marked region and operator-only plan are recorded in plan.json")
+
+    assert images == [4], f"ACTION should get 2 page images + 2 region crops, got {images}"
+    ok("ACTION received the two zoomed region crops alongside the page images")
+
+    assert (out / "rounds" / "r01" / "compare_region.png").exists()
+    rw, rh = utils.image_size(out / "rounds" / "r01" / "compare_region.png")
+    fw, fh = utils.image_size(out / "rounds" / "r01" / "compare.png")
+    assert rh < fh, (rh, fh)  # the zoom is cropped, so shorter than the full page
+    ok(f"VERIFY gets a zoomed region comparison ({rw}x{rh}) next to the full page ({fw}x{fh})")
+
+    verify_ctx = [c for c in prompter.seen if c.get("stage") == "VERIFY"]
+    assert verify_ctx and verify_ctx[0]["image2"].endswith("compare_region.png"), verify_ctx
+    assert verify_ctx[0]["image2_label"]
+    ok("the region comparison is what the operator is shown at VERIFY")
+    assert summary["rounds"][0]["operator"] is True
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -751,6 +851,7 @@ def main() -> int:
     test_operator(llm_base, renderer_url)
     test_human_verify(llm_base, renderer_url)
     test_ui_and_region()
+    test_operator_only_and_region_loop(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

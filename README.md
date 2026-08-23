@@ -104,11 +104,14 @@ out/sample/
     r01/  plan.json  action_raw.txt  patch.json
           before.html  before.png
           candidate.html  candidate.png
-          compare.png   metrics.json  verify.json
+          compare.png   compare_region.png
+          plan_view.png metrics.json  verify.json
     r02/  ...
 ```
 
-`compare.png`는 원본·수정 전·수정 후를 나란히 붙인 이미지로, 사람이 판정할 때 쓴다.
+`compare.png`는 원본·수정 전·수정 후를 나란히 붙인 이미지로, 사람이 판정할 때
+쓴다. `compare_region.png`는 영역을 지정한 라운드에만, `plan_view.png`는 사람이
+개입하는 실행에만 생긴다.
 `patch.json`은 patch 모드 라운드에만 생긴다. APPLY나 RENDER에서 실패한 라운드는
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
 `summary.json`은 라운드별로 ACTION 모드(`mode`)와 사람 개입 여부(`operator`)를
@@ -129,9 +132,14 @@ python run.py build sample.png --ui
 
 | 하는 일 | 결과 |
 | --- | --- |
-| 그냥 수락 버튼 | Qwen 판단만 사용 |
-| 의견을 적고 첨부 | Qwen 판단 + 사람 의견 |
-| `--verify human` 을 함께 지정 | VERIFY에 Qwen을 호출하지 않고 사람 판단만 사용 |
+| 수락 | Qwen 판단만 사용 |
+| 의견 첨부 | Qwen 판단 + 사람 의견 |
+| (PLAN) 계획 교체 | Qwen 계획은 남기고 사람 지시를 우선 |
+| (PLAN) Qwen 계획 버리고 사람 의견만 | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
+| (VERIFY) keep / revert / done | Qwen 판정을 사람 판정으로 교체 |
+| `--verify human` | VERIFY에 Qwen을 아예 호출하지 않는다 |
+
+어느 쪽이든 **Qwen이 뭐라고 했는지 화면에서 먼저 본 다음** 고를 수 있다.
 
 화면에 나오는 것:
 
@@ -144,6 +152,21 @@ python run.py build sample.png --ui
 UI는 표준 라이브러리만 쓴다. 서버 프레임워크를 새로 깔지 않는다. 브라우저가
 입력을 대신 주므로 터미널이 없어도 되고, `--ui-timeout` (기본 1800초) 안에 답이
 없으면 입력 없음으로 처리한다.
+
+#### 다른 PC에서 접속하기 (GPU 서버에서 돌리고 윈도우에서 보기)
+
+기본값은 `127.0.0.1` 바인딩이라 그 서버에서만 열린다. 다른 PC에서 열려면:
+
+```bash
+python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
+```
+
+출력되는 주소는 `0.0.0.0` 이 아니라 **실제로 접속 가능한 IP**로 찍힌다
+(예: `http://10.167.129.230:8900/`). 윈도우 브라우저에 그 주소를 넣으면 된다.
+
+인증이 없으니 사내망에서만 쓴다. 그래서 기본값을 localhost로 두고 `--ui-host`를
+명시적으로 켜야 하게 했다. 이미지는 그 실행의 출력 디렉터리 안에 있는 PNG만
+서빙한다.
 
 ### 영역만 지정해서 고치기
 
@@ -161,6 +184,41 @@ UI의 이미지 위를 **드래그하면 그 영역만 고치라고 지정**할 
 
 `plan.json` 에 `operator_region` 으로 남는다. 범위를 벗어나거나 형식이 잘못된
 좌표는 저장하지 않고 버린다.
+
+#### 영역 지정의 전체 흐름
+
+**별도 파이프라인이 아니다.** 같은 루프의 한 라운드에 입력이 하나 더 붙는 것뿐이다.
+
+```
+PLAN 실행 (모델)
+  └ UI에 원본 | 현재 렌더 표시
+      └ 사람: 표 영역을 드래그 + "이 표만 원본에 맞춰라" + [사람 의견만]
+          └ plan.json  ← operator_instruction + operator_region(비율 좌표)
+ACTION (모델)
+  └ 받는 것: 원본 전체, 현재 렌더 전체, 그리고
+             그 영역을 확대한 crop 2장 (원본 / 현재 렌더)
+     프롬프트: "이 crop이 보여주는 것만 고치고 나머지는 건드리지 마라"
+  └ patch 반환 (find / replace)
+APPLY (Python) → RENDER (외부 renderer) → 새 PNG
+VERIFY
+  └ UI에 두 장 표시:
+      · 전체 페이지 (원본 | 수정 전 | 수정 후)  ← 다른 곳이 망가졌는지
+      · 지정 영역 확대 (원본 | 수정 전 | 수정 후) ← 그 부분이 고쳐졌는지
+  └ 사람 또는 모델이 keep / revert / done
+```
+
+몇 가지 짚어둘 점:
+
+* **모델이 "어디인지" 아는 방법은 좌표가 아니라 그림이다.** DOM 좌표를 HTML
+  요소로 매핑하지 않는다. 확대 crop을 보여주고, 모델이 그것을 HTML 텍스트에서
+  찾아 patch를 쓴다. 그래서 좌표계 변환 코드가 필요 없다.
+* **좌표는 비율(0~1)로 저장한다.** 원본 스캔이 2480px, 렌더가 800px이어도 같은
+  영역을 가리킨다.
+* **반영 경로는 평소와 완전히 같다.** patch → APPLY → RENDER → VERIFY. 영역
+  지정이 만드는 차이는 ACTION이 보는 이미지와 VERIFY가 보여주는 이미지뿐이다.
+* **영역은 그 라운드에만 유효하다.** 다음 라운드는 다시 지정한다. 한 라운드에
+  하나만 고치는 루프 원칙과 같은 이유다.
+* 영역을 지정한 라운드는 `rounds/rNN/compare_region.png` 가 함께 남는다.
 
 PLAN이 엉뚱한 것을 우선순위로 집거나, VERIFY가 자기가 한 수정에 관대할 때 쓴다.
 둘 다 옵션이고 기본값은 꺼져 있다.
@@ -284,7 +342,8 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 이게 중요하다. 사람이 구해준 것과 모델이 스스로 한 것을 구분하지 못하면
 "Qwen이 이 작업을 할 수 있나"라는 판단이 오염된다.
 
-* `plan.json`의 `planned_by`: `model` / `model+operator`, 영역을 지정했다면
+* `plan.json`의 `planned_by`: `model` / `model+operator` / `operator`(Qwen 계획을
+  버린 경우, 원래 계획은 `model_plan`에 남는다), 영역을 지정했다면
   `operator_region`.
 * `verify.json`의 `verified_by`: `model` / `operator` / `model+operator`.
 * 뒤집기와 첨부는 남는 필드로 구분된다. 뒤집기는 `operator_instruction`(PLAN)
