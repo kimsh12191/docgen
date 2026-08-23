@@ -1820,18 +1820,36 @@ def test_docs_match_the_code() -> None:
     assert parser is None or parser  # build_parser is optional
     ok("every CLI flag the README names exists in run.py")
 
-    # 5. thinking on/off per stage, as the README's table claims.
-    thinking = {"SKELETON": False, "CHECK": True, "FILL": False,
-                "PLAN": True, "VERIFY": True}
+    # 5. thinking per stage, in both modes, as the README's table claims.
+    cfg = load_config()
+    pipe = Pipeline(cfg, ROOT / "out" / "thinking_probe")
+    stages = ("skeleton", "skeleton_check", "skeleton_fix", "fill:2", "bootstrap",
+              "plan", "action:patch", "action:section", "action:rewrite", "verify")
+
+    cfg.llm.thinking = "all"
+    off = [st for st in stages if not pipe.thinking_for(st)]
+    assert not off, f"thinking=all 인데 꺼진 단계: {off}"
+    ok(f"thinking=all reasons at every one of the {len(stages)} stages")
+
+    cfg.llm.thinking = "judging"
+    on = sorted(st for st in stages if pipe.thinking_for(st))
+    assert on == ["plan", "skeleton_check", "verify"], on
+    ok(f"thinking=judging reasons only where a decision is made: {on}")
+
+    # Every call site has to go through the one decision point, or a stage
+    # could quietly disagree with the setting.
     source = (ROOT / "pipeline.py").read_text()
-    for call, want in [('stage="skeleton"', False), ('stage="skeleton_check"', True),
-                       ('stage="plan"', True), ('stage="verify"', True)]:
-        where = source.find(call)
-        assert where != -1, call
-        window = source[max(0, where - 200):where]
-        assert f"thinking={want}" in window, f"{call} 의 thinking 이 {want} 가 아니다"
-    assert all(k in readme for k in thinking), "README의 thinking 표에 빠진 단계가 있다"
-    ok("thinking is on for the judging stages and off for the generating ones")
+    direct = [line.strip() for line in source.splitlines()
+              if "self.llm.chat(" in line and "def _chat" not in line]
+    assert len(direct) == 1, f"_chat 을 우회하는 호출: {direct}"
+    assert "thinking=self.thinking_for(stage)" in direct[0], direct[0]
+    ok("every stage calls the model through the one place thinking is decided")
+
+    for mode in ("all", "judging"):
+        assert f"`{mode}`" in readme, f"README에 thinking={mode} 설명이 없다"
+    for stage in ("SKELETON", "CHECK", "FILL", "PLAN", "VERIFY"):
+        assert stage in readme, f"README의 thinking 표에 {stage} 가 없다"
+    ok("the README documents both thinking modes and every stage in them")
 
 
 def main() -> int:

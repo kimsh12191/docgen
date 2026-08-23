@@ -69,6 +69,9 @@ def _minimal_toml(text: str, path) -> dict:
         section[match.group(1)] = _parse_value(match.group(2), where)
     return out
 
+#: Accepted values for llm.thinking.
+THINKING_MODES = ("all", "judging")
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.toml"
 
@@ -84,6 +87,9 @@ class LLMConfig:
     timeout: int = 900
     retries: int = 3
     image_max_side: int = 1600
+    #: "all" thinks at every stage; "judging" only where a decision is made
+    #: (PLAN, the layout check, VERIFY). See Pipeline.thinking_for.
+    thinking: str = "all"
 
 
 @dataclass
@@ -160,6 +166,14 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         cfg.llm.model = os.environ["DOCGEN_LLM_MODEL"]
     if os.environ.get("DOCGEN_RENDERER_URL"):
         cfg.renderer.url = os.environ["DOCGEN_RENDERER_URL"]
+    if os.environ.get("DOCGEN_LLM_THINKING"):
+        cfg.llm.thinking = os.environ["DOCGEN_LLM_THINKING"]
+
+    if cfg.llm.thinking not in THINKING_MODES:
+        raise ValueError(
+            f"llm.thinking must be one of {sorted(THINKING_MODES)}, "
+            f"got {cfg.llm.thinking!r}"
+        )
 
     cfg.llm.base_url = cfg.llm.base_url.rstrip("/")
     cfg.renderer.url = cfg.renderer.url.rstrip("/")

@@ -152,6 +152,7 @@ python run.py render test.html --width 1000    # 렌더 폭을 바꿔서
 python run.py build sample.png -o out/sample  # 전체 loop 실행
 python run.py build sample.png --max-rounds 4 -v
 python run.py build sample.png --bootstrap single   # 첫 HTML을 1회 호출로 (싸게)
+python run.py build sample.png --thinking judging  # 생성 단계 thinking 끄기
 
 # 사람이 개입하는 방식 (아래 "사람이 개입하기" 참고)
 python run.py build sample.png --note "표 정렬이 가장 중요하다"
@@ -597,7 +598,7 @@ Already tried without success:
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 138개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 141개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
@@ -629,6 +630,9 @@ Already tried without success:
 | `staged` | `true` | 3단계로 만든다. `false`면 예전처럼 한 번의 호출로 전체 생성 (`--bootstrap single` 과 같다) |
 | `rough_max_side` | `700` | 구조 단계에서 원본을 이 크기로 줄인다. 글자가 읽히면 안 되므로 너무 크게 잡지 않는다 |
 | `max_blocks` | `12` | 채우기 단계의 상한. 골격이 이보다 많이 표시하면 앞에서부터 이 개수만 채우고 경고를 남긴다 |
+
+`[llm]` 의 `thinking` 은 `all`(기본) 또는 `judging` 이다. `--thinking` 이나
+`DOCGEN_LLM_THINKING` 으로도 덮어쓸 수 있다. 자세한 건 위의 "Thinking 제어".
 
 ## 파일 구성
 
@@ -672,19 +676,37 @@ Chromium 버전과 설치된 폰트를 확인할 수 있다. 본문 텍스트에
 
 thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한다.
 
-| stage | thinking | 왜 |
-| --- | --- | --- |
-| SKELETON (1단계) | off | 구조를 만드는 생성 작업 |
-| CHECK (2단계) | **on** | "같은 페이지로 보이나"는 판단이다 |
-| FIX (2단계) | off | 지적받은 대로 고치는 생성 작업 |
-| FILL (3단계) | off | 블록을 채우는 생성 작업 |
-| BOOTSTRAP (`--bootstrap single`) | off | 생성 |
-| PLAN | **on** | 무엇이 왜 다른지 고르는 판단 |
-| ACTION (patch·section·rewrite 모두) | off | 계획을 HTML로 옮기는 생성 |
-| VERIFY | **on** | keep/revert/done 판단 |
+`llm.thinking` 이 어느 단계에서 켜는지를 정한다. 기본값은 `all` — **전 단계에서
+켠다.**
 
-판단하는 단계만 thinking을 켠다. 생성 단계에서 켜면 출력 예산을 reasoning이
-먹어서 HTML이 잘린다.
+| stage | 하는 일 | `all` (기본) | `judging` |
+| --- | --- | --- | --- |
+| SKELETON (1단계) | 구조 생성 | on | off |
+| CHECK (2단계) | "같은 페이지인가" **판단** | on | **on** |
+| FIX (2단계) | 지적받은 대로 수정 | on | off |
+| FILL (3단계) | 블록 채우기 | on | off |
+| BOOTSTRAP (`--bootstrap single`) | 전체 생성 | on | off |
+| PLAN | 무엇이 왜 다른지 고르는 **판단** | on | **on** |
+| ACTION (patch·section·rewrite) | 계획을 HTML로 | on | off |
+| VERIFY | keep/revert/done **판단** | on | **on** |
+
+**트레이드오프가 하나 있다.** reasoning 토큰은 HTML과 **같은 `max_tokens` 예산**을
+쓴다. 그래서 생성 단계에서 켜면 큰 rewrite나 큰 블록이 잘릴 확률이 올라간다.
+잘리면 `finish_reason=length` 로 그 라운드를 거부하므로 조용히 망가지지는 않고,
+에러 메시지가 이 레버를 알려준다:
+
+```
+candidate rejected: ACTION hit max_tokens (32768); the rewrite is truncated
+(llm.thinking=all, so reasoning shares that budget with the HTML;
+ thinking="judging" gives generating stages the whole of it)
+```
+
+`rejected` 가 늘고 `mode` 가 `rewrite`·`section` 이면 `--thinking judging` 으로
+바꿔 본다. 판단 단계(PLAN / CHECK / VERIFY)는 어느 모드에서도 항상 켜져 있다 —
+거기서는 reasoning이 곧 그 단계의 일이다.
+
+thinking 결정은 `Pipeline.thinking_for()` 한 곳에서만 하고, 모든 모델 호출이
+`_chat()` 을 지나간다. 단계가 설정과 어긋날 수 없다.
 
 서버가 이 key 때문에 HTTP 400을 반환하면 client가 key를 제거하고 한 번
 재시도하며, 경고를 명확히 로그에 남긴 뒤 이후로는 서버 기본값을 따른다. 이
@@ -703,7 +725,7 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 138개가
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 141개가
 21개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
@@ -747,7 +769,8 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
 * 문서와 코드의 일치 — README가 인용한 운영자 계약 블록이 실제 프롬프트와 같은지,
   scope→모드 표의 각 줄이 라우터와 맞는지, `[bootstrap]` 기본값 표가 코드의
   기본값과 같은지, README가 쓰라고 한 CLI 플래그가 실제로 있는지, thinking on/off
-  표가 실제 호출과 맞는지, 그리고 README에 적힌 검사 수가 실제로 돈 수와 같은지
+  표가 `thinking_for()` 와 두 모드 모두에서 맞는지, 모든 호출이 `_chat()` 을
+  지나가는지, 그리고 README에 적힌 검사 수가 실제로 돈 수와 같은지
 * bootstrap과 루프의 경계 — 시작 HTML을 고정하면 `staged` 든 `single` 이든 라운드별
   결정·모드·변경 줄 수가 같고 `clone.html` 이 바이트 단위로 같은지, 루프의 네 단계가
   bootstrap 설정을 아예 읽지 않는지

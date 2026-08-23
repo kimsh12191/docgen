@@ -8,7 +8,7 @@ import logging
 import sys
 from pathlib import Path
 
-from config import load_config
+from config import THINKING_MODES, load_config
 from llm import LLMError, QwenClient, image_part, system_message, user_message
 from renderer import RendererClient, RendererError
 from utils import ensure_dir, read_text, setup_logging, write_bytes, write_json
@@ -168,6 +168,8 @@ def cmd_build(args, cfg) -> int:
         cfg.loop.max_rounds = args.max_rounds
     if args.bootstrap:
         cfg.bootstrap.staged = args.bootstrap == "staged"
+    if args.thinking:
+        cfg.llm.thinking = args.thinking
 
     try:
         notes = _operator_notes(args)
@@ -299,6 +301,15 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("source", help="입력 문서 PNG")
     build.add_argument("-o", "--output", help="출력 디렉터리 (기본값 out/<이름>)")
     build.add_argument("--max-rounds", type=int, help="최대 라운드 수 (기본값은 config)")
+    build.add_argument(
+        "--thinking",
+        choices=THINKING_MODES,
+        default=None,
+        help=("어느 단계에서 thinking을 켤지. all=전부(기본), "
+              "judging=판단 단계만(PLAN/육안대조/VERIFY). "
+              "생성 단계에서 켜면 reasoning이 max_tokens를 HTML과 나눠 쓴다 "
+              "(env: DOCGEN_LLM_THINKING)"),
+    )
     build.add_argument(
         "--bootstrap",
         choices=("staged", "single"),

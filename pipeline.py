@@ -39,6 +39,10 @@ LOG = logging.getLogger("docgen.pipeline")
 # warn -- a document this dense is the signal to switch ACTION to patch mode.
 HTML_WARN_SIZE = 60000
 
+#: Stages that decide something rather than produce something. These reason
+#: regardless of llm.thinking; the rest follow it.
+JUDGING_STAGES = ("plan", "skeleton_check", "verify")
+
 
 # The operator model is exactly three states. Everything that needs to know who
 # decided reads judged_by(); nothing re-derives it from combinations of optional
@@ -210,6 +214,36 @@ class Pipeline:
     def _img(self, path_or_bytes):
         return image_part(path_or_bytes, max_side=self.max_side)
 
+    # ------------------------------------------------------------ llm calls
+
+    def thinking_for(self, stage: str) -> bool:
+        """Whether this stage reasons before answering.
+
+        The judging stages always do: choosing what is wrong, and deciding
+        whether an edit helped, is the whole of their work. Whether the
+        generating stages should is a real trade -- reasoning tokens come out of
+        the same max_tokens budget as the HTML, so a document large enough to
+        nearly fill that budget can be pushed over it by thinking, and the round
+        is rejected as truncated. "all" takes that trade; "judging" does not.
+        """
+        if self.cfg.llm.thinking == "all":
+            return True
+        return stage.split(":", 1)[0] in JUDGING_STAGES
+
+    def _budget_hint(self) -> str:
+        """Named only when thinking is a plausible part of why output ran out."""
+        if self.cfg.llm.thinking != "all":
+            return ""
+        return (
+            " (llm.thinking=all, so reasoning shares that budget with the HTML; "
+            "thinking=\"judging\" gives generating stages the whole of it)"
+        )
+
+    def _chat(self, messages, stage: str):
+        """Every model call goes through here, so no stage can disagree with
+        the configured thinking policy."""
+        return self.llm.chat(messages, thinking=self.thinking_for(stage), stage=stage)
+
     # ------------------------------------------------------------- bootstrap
 
     def bootstrap(self, source_png: Path) -> tuple[str, bytes]:
@@ -247,7 +281,8 @@ class Pipeline:
         """HTML from a generation that has to be a complete, valid document."""
         if resp.finish_reason == "length":
             raise RuntimeError(
-                f"{label} hit max_tokens={self.cfg.llm.max_tokens}; the HTML is truncated"
+                f"{label} hit max_tokens={self.cfg.llm.max_tokens}; the HTML is "
+                f"truncated{self._budget_hint()}"
             )
         html = clean_html_output(resp.content)
         ok, reason = html_sanity_check(html)
@@ -258,7 +293,7 @@ class Pipeline:
     def _bootstrap_single(self, source_png: Path) -> tuple[str, bytes, dict]:
         """The whole page in one call. Thinking OFF."""
         LOG.info("BOOTSTRAP: generating initial HTML in one pass")
-        resp = self.llm.chat(
+        resp = self._chat(
             [
                 system_message(prompts.BOOTSTRAP_SYSTEM),
                 user_message(
@@ -266,7 +301,6 @@ class Pipeline:
                     self._img(source_png),
                 ),
             ],
-            thinking=False,
             stage="bootstrap",
         )
         write_text(self.rounds_dir / "bootstrap_raw.txt", resp.content)
@@ -289,7 +323,7 @@ class Pipeline:
         """Step 1. Layout only, from a source too small to read. Thinking OFF."""
         bcfg = self.cfg.bootstrap
         LOG.info("BOOTSTRAP 1/3: structure, from a %dpx view of the page", bcfg.rough_max_side)
-        resp = self.llm.chat(
+        resp = self._chat(
             [
                 system_message(prompts.SKELETON_SYSTEM),
                 user_message(
@@ -299,7 +333,6 @@ class Pipeline:
                     self._rough(source_png),
                 ),
             ],
-            thinking=False,
             stage="skeleton",
         )
         write_text(self.rounds_dir / "bootstrap_skeleton_raw.txt", resp.content)
@@ -322,7 +355,7 @@ class Pipeline:
         LOG.info("BOOTSTRAP 2/3: comparing the layout at a glance")
         check: dict = {}
         try:
-            resp = self.llm.chat(
+            resp = self._chat(
                 [
                     system_message(prompts.SKELETON_CHECK_SYSTEM),
                     user_message(
@@ -331,7 +364,6 @@ class Pipeline:
                         self._rough(png),
                     ),
                 ],
-                thinking=True,
                 stage="skeleton_check",
             )
             check = extract_json(resp.content)
@@ -352,7 +384,7 @@ class Pipeline:
         stages.append({"step": "layout_check", "matches": False, "problems": problems,
                        "goal": goal})
         try:
-            resp = self.llm.chat(
+            resp = self._chat(
                 [
                     system_message(prompts.SKELETON_SYSTEM),
                     user_message(
@@ -365,7 +397,6 @@ class Pipeline:
                         self._rough(png),
                     ),
                 ],
-                thinking=False,
                 stage="skeleton_fix",
             )
             fixed = self._whole_document(resp, "SKELETON FIX")
@@ -414,7 +445,7 @@ class Pipeline:
         for number, marker in enumerate(markers, 1):
             label = f"block {marker['id']}" + (f" ({marker['role']})" if marker["role"] else "")
             try:
-                resp = self.llm.chat(
+                resp = self._chat(
                     [
                         system_message(prompts.FILL_SYSTEM),
                         user_message(
@@ -427,12 +458,12 @@ class Pipeline:
                             self._img(png),
                         ),
                     ],
-                    thinking=False,
                     stage=f"fill:{marker['id']}",
                 )
                 if resp.finish_reason == "length":
                     raise ValueError(
-                        f"hit max_tokens={self.cfg.llm.max_tokens}, the block is truncated"
+                        f"hit max_tokens={self.cfg.llm.max_tokens}, the block is "
+                        f"truncated{self._budget_hint()}"
                     )
                 fragment = clean_fragment_output(resp.content, marker["tag"])
                 candidate, span = fill_block(html, marker, fragment)
@@ -486,7 +517,7 @@ class Pipeline:
                 self._img(current_png),
             ),
         ]
-        resp = self.llm.chat(messages, thinking=True, stage="plan")
+        resp = self._chat(messages, stage="plan")
         plan = extract_json(resp.content)
         LOG.info(
             "PLAN: scope=%s target=%s",
@@ -585,7 +616,7 @@ class Pipeline:
             user_message(text, *parts),
         ]
         LOG.info("ACTION: mode=%s (scope=%s)", mode, plan.get("scope", "?"))
-        return mode, self.llm.chat(messages, thinking=False, stage=f"action:{mode}")
+        return mode, self._chat(messages, stage=f"action:{mode}")
 
     # ----------------------------------------------------------------- apply
 
@@ -634,7 +665,7 @@ class Pipeline:
                 self._img(candidate_png),
             ),
         ]
-        resp = self.llm.chat(messages, thinking=True, stage="verify")
+        resp = self._chat(messages, stage="verify")
         verdict = extract_json(resp.content)
 
         decision = str(verdict.get("decision", "")).strip().lower()
@@ -917,6 +948,7 @@ class Pipeline:
                     raise ValueError(
                         f"candidate rejected: ACTION hit max_tokens "
                         f"({self.cfg.llm.max_tokens}); the rewrite is truncated"
+                        f"{self._budget_hint()}"
                     )
                 candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:

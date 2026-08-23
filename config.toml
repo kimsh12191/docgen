@@ -8,6 +8,7 @@ max_tokens = 32768
 timeout = 900
 retries = 3
 image_max_side = 1600
+thinking = "all"
 
 [renderer]
 url = "http://10.167.129.230:30900"
