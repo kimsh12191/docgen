@@ -564,6 +564,9 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   crop 2장을 함께 받는지, `compare_region.png` 가 생기는지
 * 라운드 간 전달 — VERIFY의 `reason`·`next_major_issue` 가 다음 PLAN 프롬프트에
   실제로 도달하는지, history 창(3)을 넘어간 실패가 별도 목록으로 남는지
+* 개입 3상태 정합성 — `model` / `model+operator` / `operator` 를 두 단계에서
+  전부 열거해, 누가 판정했는지 · 라운드 플래그 · history 태그 · 실려 가는 근거가
+  서로 일치하는지. 이 판단을 필드 조합으로 다시 추론하는 코드가 없는지도 확인한다
 
 ### 2. 실제 브라우저 렌더러 (Chromium 필요)
 

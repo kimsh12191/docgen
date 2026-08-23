@@ -35,6 +35,43 @@ LOG = logging.getLogger("docgen.pipeline")
 HTML_WARN_SIZE = 60000
 
 
+# The operator model is exactly three states. Everything that needs to know who
+# decided reads judged_by(); nothing re-derives it from combinations of optional
+# fields. Five copies of that derivation is precisely how they drift apart, and
+# every mis-attribution bug in this file's history was one copy disagreeing.
+MODEL = "model"
+MODEL_AND_OPERATOR = "model+operator"
+OPERATOR = "operator"
+SOURCES = (MODEL, MODEL_AND_OPERATOR, OPERATOR)
+
+
+def judged_by(payload: dict | None) -> str:
+    """Who decided this plan or verdict. Written at the decision point, not guessed."""
+    if not payload:
+        return MODEL
+    source = payload.get("verified_by") or payload.get("planned_by") or MODEL
+    return source if source in SOURCES else MODEL
+
+
+def touched_by_operator(*payloads: dict | None) -> bool:
+    return any(judged_by(p) != MODEL for p in payloads)
+
+
+def deciding_words(payload: dict | None, model_reason: str) -> str:
+    """The reason belonging to whoever decided -- never the discarded one.
+
+    When the operator replaced a verdict, the model's reason explains a verdict
+    that was thrown away; presenting it as the operator's is a lie.
+    """
+    payload = payload or {}
+    reason = " ".join(str(model_reason or "").split())
+    if reason == "operator verdict":
+        reason = ""  # placeholder human_verify writes when the field is skipped
+    if judged_by(payload) == OPERATOR:
+        return str(payload.get("operator_note", "")).strip() or reason
+    return reason
+
+
 class SkipRound(Exception):
     """Raised when the operator chooses to skip the current round."""
 
@@ -85,18 +122,12 @@ class RoundResult:
         def short(value) -> str:
             return " ".join(str(value).split())[:80]
 
-        judged = self.verify.get("verified_by") or "model"
-        by_operator = judged == "operator"
+        judged = judged_by(self.verify)
+        by_operator = judged == OPERATOR
         note = str(self.verify.get("operator_note", "")).strip()
-        reason = " ".join((self.reason or "").split())
-        if reason == "operator verdict":
-            reason = ""  # placeholder when a human skipped the reason field
 
         bits: list[str] = []
-        # Whose reason this is has to match the tag on the line. When the
-        # operator decided, their own words are the reason -- the model's
-        # reason belonged to a verdict that was discarded.
-        own = note if (by_operator and note) else reason
+        own = deciding_words(self.verify, self.reason)
         if own and (self.decision == "revert" or by_operator):
             # Always carry why a revert failed; on a keep, carry it when a
             # person bothered to type one.
@@ -110,8 +141,13 @@ class RoundResult:
         if note and not by_operator:
             bits.append(f"operator: {short(note)}")
 
+        # Tag whenever a person was involved, even with nothing else to say:
+        # "a human accepted this" is itself signal for the next plan. A pure
+        # model round with nothing to add stays unadorned.
         if bits:
             line += f" [{judged}] " + "; ".join(bits)
+        elif judged != MODEL:
+            line += f" [{judged}]"
         return line
 
 
@@ -388,7 +424,7 @@ class Pipeline:
 
     def review_plan(self, plan: dict, context: dict | None = None) -> dict:
         """Let the operator amend or replace the plan before ACTION acts on it."""
-        plan.setdefault("planned_by", "model")
+        plan.setdefault("planned_by", MODEL)
         if not self.interactive:
             return plan
         print("\n--- PLAN ---")
@@ -451,18 +487,18 @@ class Pipeline:
                             "goal": rest,
                             "operator_instruction": rest,
                             "model_plan": model_plan,
-                            "planned_by": "operator",
+                            "planned_by": OPERATOR,
                         }
                     )
                     LOG.info("PLAN: operator discarded the model plan")
                 elif head == "o":
                     # ACTION is told this replaces the plan's own goal.
                     plan["operator_instruction"] = rest
-                    plan["planned_by"] = "model+operator"
+                    plan["planned_by"] = MODEL_AND_OPERATOR
                     LOG.info("PLAN: operator replaced the goal")
                 else:
                     plan["operator_note"] = rest
-                    plan["planned_by"] = "model+operator"
+                    plan["planned_by"] = MODEL_AND_OPERATOR
                     LOG.info("PLAN: operator attached a note")
                 if self._last_region:
                     plan["operator_region"] = self._last_region
@@ -521,7 +557,7 @@ class Pipeline:
                 verdict["operator_note"] = rest
                 if self._last_region:
                     verdict["operator_region"] = self._last_region
-                verdict["verified_by"] = "model+operator"
+                verdict["verified_by"] = MODEL_AND_OPERATOR
                 self.interventions += 1
                 LOG.info("VERIFY: operator attached a note, decision unchanged")
                 return verdict
@@ -533,7 +569,7 @@ class Pipeline:
                 verdict["decision"] = head
                 # The decision is the operator's now. Mirrors planned_by on the
                 # PLAN side: the model's verdict is kept only as a record.
-                verdict["verified_by"] = "operator"
+                verdict["verified_by"] = OPERATOR
                 if rest:
                     verdict["operator_note"] = rest
                 self.interventions += 1
@@ -609,7 +645,7 @@ class Pipeline:
             "decision": decision,
             "reason": reason or "operator verdict",
             "next_major_issue": next_issue,
-            "verified_by": "operator",
+            "verified_by": OPERATOR,
         }
 
     # ------------------------------------------------------------------ loop
@@ -673,7 +709,7 @@ class Pipeline:
                 action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
-                record(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=touched_by_operator(plan)))
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
@@ -695,7 +731,7 @@ class Pipeline:
                 candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)
-                record(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=touched_by_operator(plan)))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (invalid HTML)")
                 write_json(rdir / "error.json", {"stage": "apply", "error": str(exc)})
                 continue
@@ -703,7 +739,7 @@ class Pipeline:
 
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
-                record(RoundResult(index, "noop", mode=mode, plan=plan, operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "noop", mode=mode, plan=plan, operator=touched_by_operator(plan)))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> no change produced")
                 continue
 
@@ -712,7 +748,7 @@ class Pipeline:
                 candidate_png, metrics = self.render(candidate_html)
             except RendererError as exc:
                 LOG.warning("round %d: candidate failed to render: %s", index, exc)
-                record(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=touched_by_operator(plan)))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (render failed)")
                 write_json(rdir / "error.json", {"stage": "render", "error": str(exc)})
                 continue
@@ -758,7 +794,7 @@ class Pipeline:
                     )
                 else:
                     verdict = self.verify(plan, source_png, current_png, candidate_png)
-                    verdict["verified_by"] = "model"
+                    verdict["verified_by"] = MODEL
                     if self.verify_mode == "both":
                         verdict = self.review_verify(
                             verdict,
@@ -772,7 +808,7 @@ class Pipeline:
                         )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
-                record(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=touched_by_operator(plan)))
                 write_json(rdir / "error.json", {"stage": "verify", "error": str(exc)})
                 continue
             write_json(rdir / "verify.json", verdict)
@@ -786,12 +822,7 @@ class Pipeline:
                     decision,
                     reason=reason,
                     mode=mode,
-                    operator=bool(
-                        verdict.get("operator_override")
-                        or verdict.get("operator_note")
-                        or verdict.get("verified_by") in ("operator", "model+operator")
-                        or plan.get("planned_by", "model") != "model"
-                    ),
+                    operator=touched_by_operator(plan, verdict),
                     plan=plan,
                     verify=verdict,
                 )

@@ -206,6 +206,3 @@ def history_block(entries: list[str], limit: int = 3) -> str:
     lines = "\n".join(f"- {e}" for e in recent)
     return f"Previous attempts:\n{lines}\n\n{HISTORY_RULE}"
 
-
-PLANNED_BY = ("model", "model+operator")
-VERIFIED_BY = ("model", "operator", "model+operator")

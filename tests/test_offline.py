@@ -1087,6 +1087,100 @@ def test_failed_attempts_persist(llm_base: str, renderer_url: str) -> None:
 
 
 
+
+
+# ------------- 15. the three operator states agree everywhere they are read
+
+def test_three_states_are_consistent() -> None:
+    """The whole operator model is three states. Every consumer must agree.
+
+    This exists because the three states used to be re-derived independently in
+    eight places from combinations of optional fields, and each mis-attribution
+    bug was one of those copies disagreeing with the others.
+    """
+    print("[15] the three operator states agree in every consumer")
+    from pipeline import (
+        MODEL,
+        MODEL_AND_OPERATOR,
+        OPERATOR,
+        RoundResult,
+        deciding_words,
+        judged_by,
+        touched_by_operator,
+    )
+
+    # (label, plan, verdict, expected source, expected operator flag, whose reason)
+    table = [
+        ("Qwen 단독",
+         {"planned_by": MODEL},
+         {"verified_by": MODEL, "reason": "model said so"},
+         MODEL, False, "model said so"),
+        ("Qwen + 사람 첨언 (PLAN)",
+         {"planned_by": MODEL_AND_OPERATOR, "operator_note": "표 정렬도"},
+         {"verified_by": MODEL, "reason": "model said so"},
+         MODEL, True, "model said so"),
+        ("Qwen + 사람 첨언 (VERIFY)",
+         {"planned_by": MODEL},
+         {"verified_by": MODEL_AND_OPERATOR, "reason": "model said so",
+          "operator_note": "우측 정렬 남음"},
+         MODEL_AND_OPERATOR, True, "model said so"),
+        ("Qwen 폐기, 사람 지시 (PLAN)",
+         {"planned_by": OPERATOR, "operator_instruction": "이 표만",
+          "model_plan": {"goal": "버려진 계획"}},
+         {"verified_by": MODEL, "reason": "model said so"},
+         MODEL, True, "model said so"),
+        ("Qwen 폐기, 사람 판정 (VERIFY, 이유 입력)",
+         {"planned_by": MODEL},
+         {"verified_by": OPERATOR, "reason": "표가 더 어긋났다"},
+         OPERATOR, True, "표가 더 어긋났다"),
+        ("Qwen 판정 교체 (모델 이유가 남아 있어도)",
+         {"planned_by": MODEL},
+         {"verified_by": OPERATOR, "reason": "model said so",
+          "operator_note": "사람 근거", "model_decision": "keep"},
+         OPERATOR, True, "사람 근거"),
+        ("사람 판정, 이유 생략",
+         {"planned_by": MODEL},
+         {"verified_by": OPERATOR, "reason": "operator verdict"},
+         OPERATOR, True, ""),
+    ]
+
+    for label, plan, verdict, source, flagged, words in table:
+        assert judged_by(verdict) == source, (label, judged_by(verdict))
+        assert touched_by_operator(plan, verdict) is flagged, label
+        assert deciding_words(verdict, verdict.get("reason", "")) == words, (
+            label, deciding_words(verdict, verdict.get("reason", ""))
+        )
+        # The line's tag and its reason must come from the same party.
+        line = RoundResult(1, "revert", reason=verdict.get("reason", ""),
+                           plan=plan, verify=verdict).history_line()
+        assert f"[{source}]" in line, (label, line)
+        if words:
+            assert f"why: {words}" in line, (label, line)
+        else:
+            assert "why:" not in line, (label, line)
+        # The discarded verdict's reason must never appear under an operator tag.
+        if source == OPERATOR and verdict.get("operator_note"):
+            assert verdict["reason"] not in line, (label, line)
+        # The round record must agree with the flag.
+        rec = RoundResult(1, "keep", plan=plan, verify=verdict,
+                          operator=touched_by_operator(plan, verdict))
+        assert rec.operator is flagged, label
+    ok(f"all {len(table)} operator states agree across judged_by / flag / line / reason")
+
+    # Unknown or missing values fall back to the model, never crash.
+    for junk in (None, {}, {"verified_by": "nonsense"}, {"planned_by": 3}):
+        assert judged_by(junk) == MODEL, junk
+        assert touched_by_operator(junk) is False, junk
+    ok("unknown or missing sources fall back to model")
+
+    # There is exactly one definition of the three states in the codebase.
+    src = (ROOT / "pipeline.py").read_text()
+    assert src.count('planned_by", "model") != "model"') == 0
+    assert src.count('verified_by") in (') == 0
+    ok("no consumer re-derives the states from field combinations")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1106,6 +1200,7 @@ def main() -> int:
     test_operator_only_and_region_loop(llm_base, renderer_url)
     test_verify_feeds_next_plan(llm_base, renderer_url)
     test_failed_attempts_persist(llm_base, renderer_url)
+    test_three_states_are_consistent()
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

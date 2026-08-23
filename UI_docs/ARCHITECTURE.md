@@ -140,6 +140,34 @@ def interactive(self) -> bool:
 `summary.json` 에는 `verify_mode`(시작)와 `verify_mode_final`(종료 시점)이 모두
 남아서, 중간에 방식이 바뀐 실행을 나중에 구분할 수 있다.
 
+## 세 가지 상태는 한 곳에만 있다
+
+사람 개입 모델은 **세 상태뿐**이다.
+
+| 상태 | 뜻 | 남는 필드 |
+| --- | --- | --- |
+| `model` | Qwen 결과 그대로 | — |
+| `model+operator` | Qwen 결과 유지 + 사람 참고 의견 | `operator_note` |
+| `operator` | Qwen 결과 폐기, 사람 결정 | `operator_instruction`/`operator_override` + `model_plan`/`model_decision` |
+
+이 상태는 결정하는 지점에서 `planned_by` / `verified_by` 에 **기록**되고, 읽을
+때는 항상 한 함수를 거친다.
+
+```python
+judged_by(payload)                 # -> model | model+operator | operator
+touched_by_operator(plan, verdict) # 사람이 관여했나
+deciding_words(payload, reason)    # 판정한 쪽의 이유 (버려진 쪽 것이 아님)
+```
+
+**필드 조합으로 다시 추론하지 않는다.** 예전에는 이 판단이 8곳에서 각자
+이루어졌고 — `plan.get("planned_by","model") != "model"` 이 5개 복사본, 그와
+별개인 4항 OR 하나, 태그와 근거를 다른 필드에서 가져오는 곳 하나 — 실제로
+발생한 잘못된 귀속 버그는 모두 그 복사본 중 하나가 다른 것과 어긋난 결과였다.
+
+`tests/test_offline.py` 의 15번 그룹이 3상태 × 두 단계를 전부 열거해서
+`judged_by` · `operator` 플래그 · history 줄의 태그 · 실려 가는 근거가 서로
+일치하는지 확인한다. 상태를 늘리거나 소비자를 추가하면 이 표에 줄을 넣으면 된다.
+
 ## 영역 좌표 변환
 
 `side_by_side()` 가 합성 이미지와 함께 패널 박스를 돌려준다.
