@@ -191,12 +191,33 @@ python run.py build sample.png --ui --verify human
 
 ![이유 입력](images/07-verify-human-reason.png)
 
-"다음에 고칠 것"에 적은 내용은 **다음 라운드 PLAN의 history로 들어간다.** 판정을
-바꾸는 데서 끝나지 않고 다음 방향을 잡는다.
+### 판정이 다음 라운드로 전달되는 것
 
-Qwen이 판정한 경우도 같다 — Qwen이 낸 `reason`(되돌린 이유)과
-`next_major_issue`(남은 문제)가 다음 PLAN에 전달되고, 대괄호로 `[model]` /
-`[operator]` / `[model+operator]` 중 누가 판정했는지 표시된다.
+**사람이 적은 이유도 들어간다.** keep이든 revert든 마찬가지다. 무엇이 어떻게
+실려 가는지는 이렇다.
+
+| 상황 | 다음 PLAN이 보는 줄 |
+| --- | --- |
+| 사람이 판정 + 이유 입력 | `-> keep [operator] why: 표 폭은 맞았지만 여백이 남았다; next: 제목 자간` |
+| 사람이 판정 + 이유 생략 | `-> keep [operator] next: 제목 자간` |
+| Qwen 판정을 사람이 교체 | `-> revert [operator] why: 표가 더 어긋났다; next: table width` |
+| Qwen 판정 유지 + 사람 첨언 | `-> keep [model+operator] operator: 우측 정렬 남음` |
+| Qwen 단독 판정 (revert) | `-> revert [model] why: table became too wide; next: header rule` |
+| Qwen 단독 판정 (keep) | `-> keep [model] next: notes font` |
+
+읽는 규칙 세 가지:
+
+* **`why:` 는 항상 판정한 쪽의 이유다.** 대괄호가 `[operator]` 면 `why:` 도
+  사람이 적은 것이다. 사람이 Qwen 판정을 교체했을 때 버려진 Qwen의 근거는
+  여기 오지 않는다(`verify.json` 의 `model_decision` 에 기록으로만 남는다).
+* **`why:` 는 revert 일 때 항상, keep 일 때는 사람이 이유를 적었을 때만** 붙는다.
+  되돌린 이유는 같은 시도 반복을 막으니 항상 필요하고, 성공 사유는 사람이
+  일부러 적었을 때만 신호가 된다.
+* **`operator:` 는 Qwen 판정이 유지된 채 사람이 의견만 붙였을 때만** 나온다.
+  사람이 판정한 경우 그 사람 말은 이미 `why:` 에 있다.
+
+이유를 비워두면 아무것도 실리지 않는다. 자리 채우기용 문구가 프롬프트에
+들어가는 일은 없다.
 
 되돌려지거나 적용 실패한 접근은 최근 3라운드 창을 넘어서도 **실행 내내 별도
 목록으로 유지**되어 PLAN에 전달된다. 오래전에 실패한 방식을 다시 꺼내는 것을

@@ -85,18 +85,32 @@ class RoundResult:
         def short(value) -> str:
             return " ".join(str(value).split())[:80]
 
+        judged = self.verify.get("verified_by") or "model"
+        by_operator = judged == "operator"
+        note = str(self.verify.get("operator_note", "")).strip()
+        reason = " ".join((self.reason or "").split())
+        if reason == "operator verdict":
+            reason = ""  # placeholder when a human skipped the reason field
+
         bits: list[str] = []
-        if self.decision == "revert" and self.reason:
-            bits.append(f"why: {short(self.reason)}")
+        # Whose reason this is has to match the tag on the line. When the
+        # operator decided, their own words are the reason -- the model's
+        # reason belonged to a verdict that was discarded.
+        own = note if (by_operator and note) else reason
+        if own and (self.decision == "revert" or by_operator):
+            # Always carry why a revert failed; on a keep, carry it when a
+            # person bothered to type one.
+            bits.append(f"why: {short(own)}")
+
         remaining = str(self.verify.get("next_major_issue", "")).strip()
         if remaining:
             bits.append(f"next: {short(remaining)}")
-        note = str(self.verify.get("operator_note", "")).strip()
-        if note and note != self.reason.strip():
+
+        # A note attached while the model's verdict stood is a second voice.
+        if note and not by_operator:
             bits.append(f"operator: {short(note)}")
 
         if bits:
-            judged = self.verify.get("verified_by") or "model"
             line += f" [{judged}] " + "; ".join(bits)
         return line
 

@@ -910,6 +910,35 @@ def test_verify_feeds_next_plan(llm_base: str, renderer_url: str) -> None:
     assert "[operator] next: 제목 자간" in human.history_line(), human.history_line()
     ok("a human verdict is attributed to the operator, not the model")
 
+    # A human's reason must survive on a keep too, not only on a revert.
+    hk = RoundResult(6, "keep", reason="표 폭은 맞았지만 여백이 남았다",
+                     plan={"goal": "표 폭 맞추기"},
+                     verify={"reason": "표 폭은 맞았지만 여백이 남았다",
+                             "next_major_issue": "제목 자간", "verified_by": "operator"})
+    line = hk.history_line()
+    assert "why: 표 폭은 맞았지만 여백이 남았다" in line, line
+    ok("a human's reason on a kept round is carried, not dropped")
+
+    # The reason under an [operator] tag must be the operator's, not the model's.
+    ov = RoundResult(7, "revert", reason="title size now matches",
+                     plan={"goal": "제목 크기"},
+                     verify={"reason": "title size now matches", "model_decision": "keep",
+                             "operator_note": "표가 더 어긋났다",
+                             "next_major_issue": "table width", "verified_by": "operator"})
+    line = ov.history_line()
+    assert "why: 표가 더 어긋났다" in line, line
+    assert "title size now matches" not in line, (
+        "the discarded model verdict's reason must not appear under [operator]"
+    )
+    ok("an overridden round attributes the reason to the operator, not the model")
+
+    # A skipped reason field must not leak the placeholder into the prompt.
+    blank = RoundResult(8, "keep", reason="operator verdict", plan={"goal": "헤더 선"},
+                        verify={"reason": "operator verdict", "next_major_issue": "자간",
+                                "verified_by": "operator"})
+    assert "operator verdict" not in blank.history_line(), blank.history_line()
+    ok("the 'operator verdict' placeholder never reaches the prompt")
+
     both = RoundResult(5, "keep", reason="looks closer",
                        plan={"goal": "align the amounts"},
                        verify={"reason": "looks closer", "next_major_issue": "",
