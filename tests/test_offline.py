@@ -812,7 +812,47 @@ def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None
     wide.stop()
     assert "127.0.0.1" in url_local, url_local
     assert "0.0.0.0" not in url_wide and ip in url_wide, url_wide
+    assert not local.access_notes, local.access_notes
     ok(f"host=0.0.0.0 advertises a reachable address ({url_wide.strip('/')})")
+
+    # --- inside a container the guessed address is knowably wrong for anyone
+    # else, so it must come with an explanation rather than a dead link.
+    import ui as ui_mod
+
+    real_lan_ip = ui_mod.lan_ip
+    ui_mod.lan_ip = lambda: "172.17.0.2"
+    try:
+        boxed = ReviewServer(ROOT / "out", port=0, host="0.0.0.0")
+        url_boxed = boxed.start()
+        port_boxed = boxed.port
+        boxed.stop()
+    finally:
+        ui_mod.lan_ip = real_lan_ip
+    assert "172.17.0.2" in url_boxed, url_boxed
+    note = " ".join(boxed.access_notes)
+    assert "컨테이너" in note and f"-p {port_boxed}:{port_boxed}" in note, note
+    assert "--ui-public-host" in note, note
+    ok("a container-internal address is printed with what to do about it")
+
+    # --- the override changes only what is printed, never what is bound
+    pub = ReviewServer(ROOT / "out", port=0, host="0.0.0.0", public_host="10.0.0.7")
+    url_pub = pub.start()
+    bound_host, bound_port = pub._httpd.server_address
+    pub.stop()
+    assert url_pub == f"http://10.0.0.7:{bound_port}/", url_pub
+    assert bound_host == "0.0.0.0", bound_host
+    ok("--ui-public-host relabels the URL without moving the socket")
+
+    # --- and the env var is the same switch
+    os.environ["DOCGEN_UI_PUBLIC_HOST"] = "10.0.0.8"
+    try:
+        env_srv = ReviewServer(ROOT / "out", port=0, host="0.0.0.0")
+        url_env = env_srv.start()
+        env_srv.stop()
+    finally:
+        del os.environ["DOCGEN_UI_PUBLIC_HOST"]
+    assert "10.0.0.8" in url_env, url_env
+    ok("DOCGEN_UI_PUBLIC_HOST does the same as the flag")
 
     # --- a marked region drives one full round and comes back zoomed
     class FakePrompter:

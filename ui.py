@@ -277,6 +277,35 @@ def lan_ip() -> str:
         sock.close()
 
 
+def in_container() -> bool:
+    """True when this process looks containerised.
+
+    It matters for the address we print. Inside a bridged container lan_ip()
+    returns the container's own address (172.17.0.2 and friends) -- real, and
+    completely unreachable from another machine until the port is published on
+    the host. Printing it without saying so sends people to a dead link.
+    """
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r", encoding="utf-8", errors="replace") as fh:
+            blob = fh.read()
+    except OSError:
+        return False
+    return any(k in blob for k in ("docker", "containerd", "kubepods", "libpod"))
+
+
+def is_bridge_ip(ip: str) -> bool:
+    """Docker's default bridge pools live in 172.16.0.0/12."""
+    parts = ip.split(".")
+    if len(parts) != 4 or parts[0] != "172":
+        return False
+    try:
+        return 16 <= int(parts[1]) <= 31
+    except ValueError:
+        return False
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "docgen-ui"
@@ -352,11 +381,18 @@ class ReviewServer:
         port: int = 0,
         timeout: int = 1800,
         host: str = "127.0.0.1",
+        public_host: str | None = None,
     ) -> None:
         self.out_dir = Path(out_dir).resolve()
         self.host = host
         self.port = port
         self.timeout = timeout
+        # Only changes the address we print, never what we bind to. It exists
+        # because the machine cannot always work out how others reach it -- from
+        # inside a container it genuinely cannot.
+        self.public_host = public_host or os.environ.get("DOCGEN_UI_PUBLIC_HOST") or None
+        self.url = ""
+        self.access_notes: list[str] = []
         self._httpd: ThreadingHTTPServer | None = None
         self._lock = threading.Lock()
         self._pending: dict | None = None
@@ -381,10 +417,40 @@ class ReviewServer:
         self._httpd = httpd
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         bound = httpd.server_address[1]
+        self.port = bound
         # When bound to every interface, print an address another machine can
         # actually reach -- 0.0.0.0 is not usable in a browser.
-        shown = lan_ip() if self.host in ("", "0.0.0.0", "::") else self.host
-        return f"http://{shown}:{bound}/"
+        wildcard = self.host in ("", "0.0.0.0", "::")
+        guessed = ""
+        if self.public_host:
+            shown = self.public_host
+        elif wildcard:
+            shown = guessed = lan_ip()
+        else:
+            shown = self.host
+        self.url = f"http://{shown}:{bound}/"
+        self.access_notes = self._access_notes(guessed, bound)
+        return self.url
+
+    def _access_notes(self, guessed: str, port: int) -> list[str]:
+        """What the printed address does not say by itself."""
+        notes: list[str] = []
+        if self.host not in ("127.0.0.1", "localhost"):
+            notes.append(
+                "이 주소는 같은 네트워크의 다른 PC에서도 열립니다. "
+                "인증이 없으니 사내망에서만 쓰세요"
+            )
+        # A guessed address is only a guess. Inside a container it is knowably
+        # wrong for anyone outside, so say so instead of leaving a dead link.
+        if guessed and (in_container() or is_bridge_ip(guessed)):
+            notes.append(
+                f"{guessed} 은 컨테이너 내부 주소라 윈도우 브라우저에서는 열리지 "
+                "않습니다. 컨테이너를 -p {p}:{p} (또는 --network host) 로 띄웠는지 "
+                "확인하고, 브라우저에는 서버 주소를 넣으세요 "
+                "(예: http://<서버IP>:{p}/). --ui-public-host=<서버IP> 를 주면 "
+                "위 줄에 그 주소가 바로 찍힙니다".format(p=port)
+            )
+        return notes
 
     def stop(self) -> None:
         self.finished = True

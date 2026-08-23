@@ -213,7 +213,7 @@ path, panels = side_by_side([("1. SOURCE", src), ("2. CURRENT RENDER", png)], ou
 | `ui.py` | `ReviewServer`, HTTP 핸들러, 페이지 한 덩어리 |
 | `pipeline.py` | `review_plan` / `review_verify` 가 `choices` 를 선언하고 답을 해석 |
 | `utils.py` | `side_by_side` (패널 박스 포함), `crop_normalized` |
-| `run.py` | `--ui`, `--ui-host`, `--ui-port`, `--ui-timeout` |
+| `run.py` | `--ui`, `--ui-host`, `--ui-public-host`, `--ui-port`, `--ui-timeout` |
 | `prompts.py` | 사람 개입이 있는 실행에 붙는 계약 블록, 영역 설명 블록, history·실패목록 블록 |
 
 ---
@@ -254,7 +254,8 @@ UI 관련해 덮는 것:
 * 비율 rect가 크기가 다른 이미지에 비례해 적용되는지
 * 영역을 지정한 라운드에서 ACTION이 이미지 4장을 받고 `compare_region.png` 가
   생기는지
-* `0.0.0.0` 바인딩이 접속 가능한 주소를 광고하는지
+* `0.0.0.0` 바인딩이 접속 가능한 주소를 광고하는지, 컨테이너 내부 주소면
+  안내가 붙는지, `--ui-public-host` 가 바인딩을 옮기지 않는지
 * 실행 중 설정 전환이 파이프라인에 즉시 반영되는지, 잘못된 값을 무시하는지
 * 영역 지정이 ACTION의 확대 crop 2장과 `compare_region.png` 로 이어지는지
 

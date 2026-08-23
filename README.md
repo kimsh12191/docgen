@@ -183,8 +183,25 @@ UI는 표준 라이브러리만 쓴다. 서버 프레임워크를 새로 깔지 
 python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 ```
 
-출력되는 주소는 `0.0.0.0` 이 아니라 **실제로 접속 가능한 IP**로 찍힌다
-(예: `http://10.167.129.230:8900/`). 윈도우 브라우저에 그 주소를 넣으면 된다.
+출력되는 주소는 `0.0.0.0` 이 아니라 이 머신이 스스로 짐작한 IP로 찍힌다. 그런데
+**도커 컨테이너 안에서 돌리면 그 짐작이 틀린다** — `172.17.0.2` 같은 컨테이너
+내부 주소가 나오고, 윈도우에서는 그 주소로 열리지 않는다. 두 가지가 필요하다:
+
+1. 컨테이너가 그 포트를 host로 내보내고 있어야 한다 (`docker run -p 8900:8900`
+   또는 `--network host`). 이게 없으면 어떤 주소를 넣어도 안 열린다.
+2. 브라우저에는 컨테이너가 아니라 **서버 주소**를 넣는다
+   (예: `http://10.167.129.230:8900/`).
+
+`--ui-public-host` 를 주면 그 주소가 출력 줄에 바로 찍혀서 복사해 쓸 수 있다.
+바인딩은 `--ui-host` 그대로고, 찍히는 주소만 바뀐다:
+
+```bash
+python run.py build sample.png --ui \
+  --ui-host 0.0.0.0 --ui-port 8900 --ui-public-host 10.167.129.230
+```
+
+환경변수 `DOCGEN_UI_PUBLIC_HOST` 도 같은 스위치다. 컨테이너 내부 주소가 찍힐
+때는 실행 시점에 위 내용이 경고로 함께 출력된다.
 
 인증이 없으니 사내망에서만 쓴다. 그래서 기본값을 localhost로 두고 `--ui-host`를
 명시적으로 켜야 하게 했다. 이미지는 그 실행의 출력 디렉터리 안에 있는 PNG만
@@ -555,8 +572,8 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 87개가
-14개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 103개가
+16개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -571,6 +588,8 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
 * 검토 UI — 패널 좌표 계산, 출력 디렉터리 밖 파일·PNG 아닌 파일 거부, 질문
   게시부터 답 수신까지 HTTP 왕복, 범위를 벗어난 영역 좌표 폐기, 실행 중 설정
   전환이 다음 라운드에 반영되는지, `0.0.0.0` 바인딩이 접속 가능한 주소를
+  광고하는지, 컨테이너 내부 주소일 때 안내가 따라붙는지, `--ui-public-host` 가
+  바인딩은 그대로 두고 찍히는 주소만 바꾸는지
   광고하는지
 * 영역 지정 — 비율 rect가 크기가 다른 이미지에 비례 적용되는지, ACTION이 확대
   crop 2장을 함께 받는지, `compare_region.png` 가 생기는지

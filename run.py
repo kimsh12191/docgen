@@ -220,14 +220,17 @@ def cmd_build(args, cfg) -> int:
         from ui import ReviewServer
 
         server = ReviewServer(
-            out_dir, port=args.ui_port, timeout=args.ui_timeout, host=args.ui_host
+            out_dir,
+            port=args.ui_port,
+            timeout=args.ui_timeout,
+            host=args.ui_host,
+            public_host=args.ui_public_host,
         )
         url = server.start()
         prompter = server
         print(f"검토 UI: {url}  (브라우저에서 열어두세요)")
-        if args.ui_host not in ("127.0.0.1", "localhost"):
-            print("  주의: 이 주소는 같은 네트워크의 다른 PC에서도 열립니다. "
-                  "인증이 없으니 사내망에서만 쓰세요")
+        for note in server.access_notes:
+            print(f"  주의: {note}")
 
     try:
         summary = Pipeline(
@@ -315,6 +318,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--ui-host",
         default="127.0.0.1",
         help="UI 바인딩 주소. 다른 PC(예: 윈도우)에서 접속하려면 0.0.0.0",
+    )
+    build.add_argument(
+        "--ui-public-host",
+        default=None,
+        help=(
+            "UI 주소를 찍을 때 쓸 호스트. 바인딩은 --ui-host 그대로다. "
+            "컨테이너 안에서는 자기 주소를 알 수 없으니 서버 IP를 여기에 준다 "
+            "(env: DOCGEN_UI_PUBLIC_HOST)"
+        ),
     )
     build.add_argument(
         "--ui-timeout",
