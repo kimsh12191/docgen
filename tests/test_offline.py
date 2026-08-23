@@ -387,7 +387,7 @@ def test_patch_mode() -> None:
         ("missing 'find'", [{"find": "NOT_PRESENT", "replace": "x"}]),
         ("ambiguous 'find'", [{"find": "<p>", "replace": "<div>"}]),
         ("empty edit list", []),
-        ("no-op edit", [{"find": "<p>a</p>", "replace": "<p>a</p>"}]),
+        ("all-no-op patch", [{"find": "<p>a</p>", "replace": "<p>a</p>"}]),
         ("empty 'find'", [{"find": "", "replace": "x"}]),
         ("non-string 'replace'", [{"find": "<p>a</p>", "replace": 3}]),
         ("edit is not an object", ["nope"]),
@@ -398,7 +398,17 @@ def test_patch_mode() -> None:
             pass
         else:
             raise AssertionError(f"{label} should have been rejected")
-    ok("missing / ambiguous / empty / no-op / malformed edits all rejected")
+    ok("missing / ambiguous / empty / all-no-op / malformed edits all rejected")
+
+    # A restated line mixed in with real edits must not cost the whole round --
+    # it asks for nothing, and the edits beside it are the round's actual work.
+    out3, applied3 = apply_edits(doc, [
+        {"find": "<p>a</p>", "replace": "<p>a</p>"},
+        {"find": "font-size:28px", "replace": "font-size:31px"},
+    ])
+    assert "font-size:31px" in out3, out3
+    assert len(applied3) == 1, applied3
+    ok("a no-op edit is dropped, the real edits beside it still apply")
 
     # An ambiguous find must not partially apply.
     try:
@@ -1355,6 +1365,70 @@ def test_renderer_stays_external() -> None:
 
 
 
+# ------------------------------- 17. the loop has to actually move the document
+
+def test_loop_makes_progress() -> None:
+    """Every mechanism whose failure looks like \"nothing changed\"."""
+    print("\n[17] 루프가 문서를 실제로 움직인다")
+    import prompts
+    from utils import diff_line_count
+
+    # 1. The change measure has to see an edit that keeps the length.
+    before = "<style>h1{font-size:28px}</style>\n<body><p>a</p></body>"
+    after = "<style>h1{font-size:31px}</style>\n<body><p>a</p></body>"
+    assert diff_line_count(before, after) == 2, diff_line_count(before, after)
+    assert len(before) == len(after), "fixture no longer tests the equal-length case"
+    assert diff_line_count(before, before) == 0
+    ok("diff_line_count sees a same-length edit that a char count would miss")
+
+    # 2. A one-instance patch is the failure the user actually sees, so ACTION
+    #    has to be told that a short "find" is about response size, not scope.
+    # Wrapped prompt text, so compare with the line breaks flattened out.
+    flat = lambda text: " ".join(text.split())
+    patch_prompt = flat(prompts.ACTION_PATCH_USER)
+    assert "one edit for every place" in patch_prompt, patch_prompt
+    assert "not about making the edit small" in patch_prompt, patch_prompt
+    assert "EVERYWHERE it appears" in flat(prompts.PLAN_USER), prompts.PLAN_USER
+    ok("PLAN and ACTION both ask for the fix in every place it applies")
+
+    # 3. "done" is the one verdict that ends the run, so its bar must not be
+    #    "a person would call it essentially the same".
+    assert "you are not done" in flat(prompts.VERIFY_USER), prompts.VERIFY_USER
+    assert "essentially the same document" not in flat(prompts.VERIFY_USER)
+    ok("VERIFY cannot call it done while naming a remaining mismatch")
+
+    # 4. And if it does anyway, the code refuses to stop on it.
+    from pipeline import Pipeline
+
+    cfg = load_config()
+    pipe = Pipeline(cfg, ROOT / "out" / "progress_probe")
+
+    class Canned:
+        supports_thinking_flag = True
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def chat(self, messages, thinking=False, stage="", **kw):
+            from llm import LLMResponse
+            return LLMResponse(json.dumps(self.payload), "stop", {})
+
+    png = make_source_png(Path("tmp/source_fixture.png"))
+    png_bytes = png.read_bytes()  # verify() encodes its images, so these must be real
+    contradictory = {"decision": "done", "reason": "close enough",
+                     "next_major_issue": "table column widths are still wrong"}
+    pipe.llm = Canned(contradictory)
+    verdict = pipe.verify({"goal": "g"}, png, png_bytes, png_bytes)
+    assert verdict["decision"] == "keep", verdict
+    assert verdict["downgraded_from"] == "done", verdict
+    ok("done + a named remaining issue is downgraded to keep, the run continues")
+
+    pipe.llm = Canned({"decision": "done", "reason": "matches", "next_major_issue": ""})
+    clean = pipe.verify({"goal": "g"}, png, png_bytes, png_bytes)
+    assert clean["decision"] == "done" and "downgraded_from" not in clean, clean
+    ok("a genuine done still ends the run")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1376,6 +1450,7 @@ def main() -> int:
     test_three_states_are_consistent()
     test_config_without_tomllib()
     test_renderer_stays_external()
+    test_loop_makes_progress()
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

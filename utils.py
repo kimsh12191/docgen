@@ -284,19 +284,41 @@ def html_sanity_check(html: str, min_length: int = 200) -> tuple[bool, str]:
     return True, "ok"
 
 
+def diff_line_count(before: str, after: str) -> int:
+    """How many lines differ between two documents.
+
+    Length alone is a bad measure of an edit -- swapping 28px for 31px moves
+    nothing on the ruler. This counts changed lines instead, so a round that
+    only reflows attributes still registers as work.
+    """
+    import difflib
+
+    diff = difflib.unified_diff(before.splitlines(), after.splitlines(), n=0, lineterm="")
+    return sum(
+        1 for line in diff if line[:1] in "+-" and not line.startswith(("+++", "---"))
+    )
+
+
 def apply_edits(html: str, edits) -> tuple[str, list[str]]:
     """Apply exact search/replace edits in order.
 
     Every `find` must match exactly once at the moment it is applied. An edit
-    that is missing, ambiguous, or a no-op raises instead of being skipped: a
-    partially applied patch is worse than a rejected round, because VERIFY would
-    then judge an edit that never fully happened.
+    that is missing or ambiguous raises instead of being skipped: a partially
+    applied patch is worse than a rejected round, because VERIFY would then
+    judge an edit that never fully happened.
+
+    An edit whose `replace` equals its `find` is the one exception. It asks for
+    nothing, so dropping it leaves the rest of the patch exactly as the model
+    intended -- and failing the whole round over a restated line throws away the
+    real edits sitting next to it. A patch of nothing but no-ops still raises,
+    because then there is no edit at all.
     """
     if not isinstance(edits, list) or not edits:
         raise ValueError("patch contained no edits")
 
     out = html
     applied: list[str] = []
+    noops = 0
     for index, edit in enumerate(edits, 1):
         if not isinstance(edit, dict):
             raise ValueError(f"edit {index} is not an object")
@@ -307,7 +329,9 @@ def apply_edits(html: str, edits) -> tuple[str, list[str]]:
         if not isinstance(replace, str):
             raise ValueError(f"edit {index} has a non-string 'replace'")
         if find == replace:
-            raise ValueError(f"edit {index} is a no-op")
+            LOG.debug("edit %d asks for no change, dropped: %r", index, find[:60])
+            noops += 1
+            continue
 
         hits = out.count(find)
         if hits == 0:
@@ -319,6 +343,11 @@ def apply_edits(html: str, edits) -> tuple[str, list[str]]:
 
         out = out.replace(find, replace, 1)
         applied.append(f"{find[:60]!r} -> {replace[:60]!r}")
+
+    if not applied:
+        raise ValueError(f"patch asked for no change at all ({noops} no-op edit(s))")
+    if noops:
+        LOG.info("APPLY: dropped %d no-op edit(s) of %d", noops, len(edits))
 
     return out, applied
 

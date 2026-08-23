@@ -42,6 +42,9 @@ Inspect both images carefully.
 Find the single most important mismatch that should be fixed next.
 Prefer a higher-level cause that explains multiple visible symptoms
 instead of listing many tiny differences.
+One round fixes one problem, but it fixes it EVERYWHERE it appears.
+If the same mismatch shows up in ten table rows, the goal is all ten rows,
+not one of them. Say so in the goal.
 Decide whether the problem is global or local.
 Do not write HTML yet.
 Return JSON only:
@@ -79,6 +82,11 @@ Copy it verbatim, including whitespace and punctuation.
 Keep each "find" as short as possible while still being unique - normally a
 single CSS declaration, one attribute, one tag, or one table row.
 Do not return the whole document.
+
+Short "find" strings are about keeping the response small, not about making the
+edit small. Return one edit for every place the plan's goal applies: if the
+problem appears in ten rows, return ten edits. A patch that fixes one instance
+and leaves the other nine is a wasted round.
 
 Return JSON only:
 {{
@@ -121,8 +129,10 @@ Choose exactly one:
 - keep
 - revert
 - done
-Use "done" only when the remaining differences are minor enough
-that a person would regard the HTML as essentially the same document.
+Use "done" only when you can find no remaining mismatch worth another round -
+placing the two images side by side, a person would call them the same
+document. If you can name a largest remaining mismatch in
+"next_major_issue", you are not done; choose "keep" or "revert" instead.
 Return JSON only:
 {{
   "goal_achieved": true,

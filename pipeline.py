@@ -13,6 +13,7 @@ from llm import LLMError, QwenClient, image_part, system_message, user_message
 from renderer import RendererClient, RendererError
 from utils import (
     apply_edits,
+    diff_line_count,
     clean_html_output,
     ensure_dir,
     extract_json,
@@ -86,6 +87,9 @@ class RoundResult:
     plan: dict = field(default_factory=dict)
     verify: dict = field(default_factory=dict)
     error: str = ""
+    #: Lines the candidate changed. 0 on a round that never produced one. The
+    #: whole point of the loop is that this stays above zero.
+    changed_lines: int = 0
 
     #: Outcomes that mean the attempt did not land. An LLM error is not the
     #: plan's fault, and an operator skip is not a failed approach.
@@ -395,6 +399,18 @@ class Pipeline:
             decision = "revert"
             verdict["decision"] = decision
             verdict.setdefault("reason", "unparsable decision")
+        # "done" while still naming a largest remaining mismatch is a verdict
+        # arguing with itself, and it ends the run early. The named issue is the
+        # more specific half of the answer, so keep the edit and keep going.
+        remaining = str(verdict.get("next_major_issue", "")).strip()
+        if decision == "done" and remaining:
+            LOG.warning(
+                "VERIFY said done but still names a remaining issue (%s); continuing",
+                truncate(remaining, 80),
+            )
+            decision = "keep"
+            verdict["decision"] = decision
+            verdict["downgraded_from"] = "done"
         LOG.info("VERIFY: %s (%s)", decision, truncate(str(verdict.get("reason", "")), 100))
         return verdict
 
@@ -667,6 +683,14 @@ class Pipeline:
                 continue
             write_text(rdir / "candidate.html", candidate_html)
 
+            changed_lines = diff_line_count(current_html, candidate_html)
+            LOG.info(
+                "round %d: candidate changes %d line(s), %+d chars",
+                index,
+                changed_lines,
+                len(candidate_html) - len(current_html),
+            )
+
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
                 record(RoundResult(index, "noop", mode=mode, plan=plan, operator=touched_by_operator(plan)))
@@ -746,6 +770,7 @@ class Pipeline:
                     operator=touched_by_operator(plan, verdict),
                     plan=plan,
                     verify=verdict,
+                    changed_lines=changed_lines,
                 )
             )
             # Built from the round that was just recorded, so the verdict's own
@@ -780,6 +805,12 @@ class Pipeline:
             "rejected": sum(1 for r in results if r.decision in ("rejected", "noop")),
             "errors": sum(1 for r in results if r.decision == "error"),
             "skipped": sum(1 for r in results if r.decision == "skipped"),
+            # How far the loop actually moved the document. A run that ends with
+            # kept_line_changes near zero produced a clone that is still the
+            # bootstrap draft, whatever the per-round verdicts said.
+            "kept_line_changes": sum(
+                r.changed_lines for r in results if r.decision in ("keep", "done")
+            ),
             "operator_notes": self.notes,
             "operator_interventions": self.interventions,
             "operator_rounds": sum(1 for r in results if r.operator),
@@ -797,6 +828,7 @@ class Pipeline:
                     "target": r.plan.get("target", ""),
                     "goal": r.plan.get("goal", ""),
                     "reason": r.reason,
+                    "changed_lines": r.changed_lines,
                     "error": r.error,
                 }
                 for r in results
@@ -804,12 +836,14 @@ class Pipeline:
         }
         write_json(self.out / "summary.json", summary)
         LOG.info(
-            "BUILD done: %s (stop=%s, kept=%d, reverted=%d, rejected=%d, errors=%d)",
+            "BUILD done: %s (stop=%s, kept=%d, reverted=%d, rejected=%d, errors=%d, "
+            "lines changed=%d)",
             clone_html,
             stop_reason,
             summary["kept"],
             summary["reverted"],
             summary["rejected"],
             summary["errors"],
+            summary["kept_line_changes"],
         )
         return summary
