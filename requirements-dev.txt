@@ -1,4 +1,8 @@
 # Test-only dependencies (tests/). The pipeline itself needs only requirements.txt.
-playwright>=1.40   # tests/real_renderer.py  - real Chromium renderer stand-in
+#
+# No browser engine belongs here. The renderer is an already-running external
+# Docker service; this project is only its HTTP client. Do not add playwright,
+# selenium, pyppeteer or any other driver -- tests/test_offline.py has a guard
+# that fails the suite if one shows up.
 anthropic>=1.0     # tests/claude_llm_adapter.py - Claude-backed VLM stand-in
 pyflakes

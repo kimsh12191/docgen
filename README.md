@@ -582,17 +582,25 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
 * 개입 3상태 정합성 — `model` / `model+operator` / `operator` 를 두 단계에서
   전부 열거해, 누가 판정했는지 · 라운드 플래그 · history 태그 · 실려 가는 근거가
   서로 일치하는지. 이 판단을 필드 조합으로 다시 추론하는 코드가 없는지도 확인한다
+* 렌더러 경계 — 브라우저 드라이버를 import 하는 모듈이나 그걸 설치하는
+  requirements가 없는지, 브라우저를 띄우는 코드가 없는지, `/probe` 에 응답할 수
+  있는 모듈이 없는지(`renderer.py` 는 호출만 한다)
 
-### 2. 실제 브라우저 렌더러 (Chromium 필요)
+### 2. 실제 렌더러로 확인하기
+
+브라우저는 이 프로젝트가 띄우지 않는다. 렌더러는 이미 떠 있는 외부 Docker
+서비스이고, 여기서 하는 일은 `POST /probe` 를 호출하는 것뿐이다. 그래서 실제
+렌더링 확인은 그 서비스를 그대로 가리키면 된다.
 
 ```bash
-pip install playwright        # 브라우저 바이너리는 이미 있다고 가정
-python3 tests/real_renderer.py 38900
-DOCGEN_RENDERER_URL=http://127.0.0.1:38900 python run.py render page.html -o page.png
+curl http://10.167.129.230:30900/health   # config.toml 의 기본 렌더러
+python run.py render page.html -o page.png
 ```
 
-`/health` + `/probe` 계약을 실제 Chromium으로 구현한다. `probe_js`를 페이지
-안에서 진짜로 평가하므로, probe script가 동작하는지 확인할 때 쓴다.
+`render` 명령이 돌려주는 PNG가 `probe_js` 평가 결과(`metrics`)와 함께 나오므로,
+probe script가 실제 페이지에서 동작하는지도 이걸로 확인한다. Playwright를 설치
+하거나 Chromium을 띄우거나 `/probe` 에 가짜로 응답하는 서버를 이 저장소에 만들지 마라 —
+테스트 16번이 그걸 막는다.
 
 ### 3. Qwen 대신 Claude로 루프 돌리기 (API 키 필요)
 
@@ -600,11 +608,10 @@ DOCGEN_RENDERER_URL=http://127.0.0.1:38900 python run.py render page.html -o pag
 pip install anthropic
 export ANTHROPIC_API_KEY=...
 python3 tests/claude_llm_adapter.py 38902     # OpenAI 계약 -> Claude API
-python3 tests/real_renderer.py 38900          # 별도 터미널
 
 DOCGEN_LLM_BASE_URL=http://127.0.0.1:38902/v1 \
 DOCGEN_LLM_MODEL=claude-opus-5 \
-DOCGEN_RENDERER_URL=http://127.0.0.1:38900 \
+DOCGEN_RENDERER_URL=http://10.167.129.230:30900 \
 python run.py build source.png -o out/source
 ```
 

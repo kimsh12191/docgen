@@ -189,7 +189,11 @@ class RendererClient:
 
         if not isinstance(data, dict):
             raise RendererError(f"/probe returned unexpected payload type {type(data).__name__}")
-        if not data.get("ok", False):
+        # The contract names two failure conditions: ok is false, or there is no
+        # png_base64. A missing "ok" is not one of them -- defaulting it to False
+        # would reject a response that carries a perfectly good PNG. Anything
+        # else falsy (0, null, "") is read as a failure, not as an absent field.
+        if not data.get("ok", True):
             raise RendererError(f"/probe failed: {data.get('error', 'unknown error')}")
 
         b64 = data.get("png_base64")

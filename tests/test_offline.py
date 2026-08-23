@@ -107,6 +107,39 @@ def test_renderer_smoke() -> str:
         ok("ok:false raises RendererError")
     else:
         raise AssertionError("empty html should have raised")
+
+    # The contract names exactly two /probe failures: ok is false, or there is
+    # no png_base64. A response with a good PNG and no "ok" field is a success --
+    # defaulting the missing field to False used to throw away a working render.
+    import base64 as _b64
+
+    real_png = _b64.b64encode(png).decode()
+    shapes = [
+        ({"ok": True, "png_base64": real_png}, None),
+        ({"png_base64": real_png}, None),                      # no "ok" -> success
+        ({"ok": True, "png_base64": real_png, "metrics": {"page": {}}}, None),
+        ({"ok": False, "error": "boom"}, "boom"),
+        ({"ok": 0, "error": "falsy"}, "falsy"),                # falsy != absent
+        ({"ok": True}, "png_base64"),
+        ({}, "png_base64"),
+        ({"ok": True, "png_base64": "not base64 at all !!"}, "base64"),
+    ]
+    original_fetch = client._fetch
+    try:
+        for body, want_err in shapes:
+            client._fetch = lambda path, payload=None, _b=body: json.dumps(_b).encode()
+            try:
+                got, _ = client.probe("<html></html>", width=800)
+            except Exception as exc:
+                assert want_err, f"{body} 는 성공해야 하는데 실패했다: {exc}"
+                assert want_err in str(exc), f"{body}: {exc}"
+            else:
+                assert not want_err, f"{body} 는 실패해야 하는데 통과했다"
+                assert got[:8] == b"\x89PNG\r\n\x1a\n", body
+    finally:
+        client._fetch = original_fetch
+    ok(f"/probe response shapes: {len(shapes)} cases, missing 'ok' counts as success")
+
     return url
 
 
@@ -1215,6 +1248,73 @@ def test_config_without_tomllib() -> None:
 
 
 
+# ------------------------------------ 16. the renderer stays external
+
+
+def test_renderer_stays_external() -> None:
+    """The renderer is somebody else's service, and must stay that way.
+
+    The contract is fixed: an already-running Docker service answering
+    ``GET /health`` and ``POST /probe``. This project is only its HTTP client.
+    Standing up a second renderer here -- installing a browser driver, launching
+    Chromium, serving /probe from a shipped module -- is the failure this guard
+    exists to catch, because it is the kind of thing that gets added back by
+    accident (a dev dependency, a "just for testing" server) and then quietly
+    runs on the GPU box alongside the real one.
+    """
+    print("\n[16] 렌더러는 외부 서비스로 유지된다")
+
+    import re
+
+    DRIVERS = ("playwright", "selenium", "pyppeteer", "puppeteer", "splinter", "helium")
+    py_files = sorted(list(ROOT.glob("*.py")) + list((ROOT / "tests").glob("*.py")))
+    assert py_files, "스캔할 파일을 찾지 못했다"
+
+    # 1. Nothing imports a browser driver. Matching the import statement rather
+    #    than the bare name is what lets this file name the drivers it forbids.
+    driver_import = re.compile(
+        r"^\s*(?:import|from)\s+(?:%s)\b" % "|".join(DRIVERS), re.MULTILINE
+    )
+    offenders = [f.name for f in py_files if driver_import.search(f.read_text())]
+    assert not offenders, f"브라우저 드라이버를 import 하는 파일: {offenders}"
+    ok("no module imports a browser driver")
+
+    # 2. No requirements file asks pip to install one. Comments are stripped
+    #    first -- requirements-dev.txt names the drivers in order to forbid them.
+    for req in sorted(ROOT.glob("requirements*.txt")):
+        body = "\n".join(
+            line.split("#", 1)[0] for line in req.read_text().splitlines()
+        ).lower()
+        named = [d for d in DRIVERS if d in body]
+        assert not named, f"{req.name} 이 {named} 를 설치하려 한다"
+    ok("no requirements file installs a browser driver")
+
+    # 3. Nothing launches a browser, driver import or not. This file is skipped
+    #    because it is where the forbidden names are written down; check 1 above
+    #    still covers it, since none of these can be called without an import.
+    launches = ("chromium.launch", "webdriver.Chrome", "webdriver.Firefox", "sync_playwright")
+    for f in py_files:
+        if f.name == Path(__file__).name:
+            continue
+        text = f.read_text()
+        hits = [k for k in launches if k in text]
+        assert not hits, f"{f.name} 이 브라우저를 실행한다: {hits}"
+    ok("nothing launches a browser")
+
+    # 4. No shipped module implements the renderer side of the contract.
+    #    renderer.py may mention /probe -- it is the client that POSTs to it --
+    #    but it must not be able to answer one.
+    for f in sorted(ROOT.glob("*.py")):
+        text = f.read_text()
+        if "/probe" not in text:
+            continue
+        assert f.name == "renderer.py", f"{f.name} 이 /probe 계약에 손을 댄다"
+        for server_api in ("do_POST", "do_GET", "BaseHTTPRequestHandler", "HTTPServer"):
+            assert server_api not in text, f"renderer.py 가 서버가 되어 있다: {server_api}"
+    ok("no shipped module can answer /probe -- renderer.py only calls it")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1235,6 +1335,7 @@ def main() -> int:
     test_failed_attempts_persist(llm_base, renderer_url)
     test_three_states_are_consistent()
     test_config_without_tomllib()
+    test_renderer_stays_external()
     print(f"\n{len(PASS)} checks passed.")
     return 0
 
