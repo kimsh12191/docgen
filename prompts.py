@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 HISTORY_RULE = (
+    "A history line may carry what the previous verdict concluded: \"why\" is the\n"
+    "reason an edit was reverted, \"next\" is what was thought to still be wrong,\n"
+    "and the tag in brackets says who judged it.\n"
     "Treat previous attempts as history, not facts.\n"
     "Judge the current images first."
 )

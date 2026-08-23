@@ -406,6 +406,18 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 건강한 실행은 `kept`가 대부분이고 `stop_reason`이 `done`이다.
 `reverted`가 섞이는 것은 정상이다 — VERIFY가 제 역할을 했다는 신호다.
 
+VERIFY의 판단은 다음 라운드 PLAN으로 이어진다. 되돌린 이유(`why`)와 아직 남은
+문제(`next`)가 짧은 history 한 줄로 실려 가고, 누가 판정했는지 대괄호로
+표시된다.
+
+```
+Previous attempts:
+- Round 3: reduce the title font -> revert [model] why: table became too wide; next: header rule
+- Round 4: fix the header rule -> keep [operator] next: 제목 자간이 아직 다르다
+```
+
+되돌린 이유가 함께 가므로 같은 시도를 반복하지 않는다.
+
 라운드별로 더 파고들려면 `rounds/rNN/` 안을 본다. `plan.json`(무엇을 고치려
 했는지) → `patch.json` 또는 `action_raw.txt`(실제로 뭘 했는지) →
 `before.png` / `candidate.png`(그래서 어떻게 변했는지) → `verify.json`(왜
@@ -418,7 +430,7 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `doctor`의 `[LLM]` 또는 `[Renderer]`가 FAIL | 서비스에 못 닿는다. 사내망·VPN·방화벽을 먼저 확인한다. 코드를 고칠 일이 아니다. |
 | `rejected`가 대부분이고 `mode`가 `rewrite` | 문서가 커서 ACTION이 `max_tokens`에 걸린다. 로그의 `finish_reason == 'length'` 경고로 확인된다. PLAN이 `global`만 내고 있다는 뜻이므로 PLAN 프롬프트를 국소 수정 쪽으로 유도해야 한다. |
 | `rejected`가 대부분이고 `mode`가 `patch` | `find` 문자열이 문서에 없거나 여러 곳에 매칭된다. `error.json`에 어느 문자열이 문제였는지 그대로 찍힌다. patch 프롬프트에서 "유일하게 매칭되는 짧은 문자열" 지시를 강화할 지점이다. |
-| `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. |
+| `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. 이 값은 다음 라운드 PLAN에 전달되므로, 계속 같은 값이면 PLAN이 그걸 못 고치고 있다는 뜻이다. |
 | `thinking_control`이 `false` | 서버가 해당 파라미터를 안 받는다. 동작은 하지만 PLAN·VERIFY가 thinking 없이 판단하므로 품질이 떨어질 수 있다. |
 | `errors`가 있다 | LLM 호출 실패다. `run.log`에 재시도 내역과 HTTP 응답이 남는다. |
 | `kept`만 쌓이는데 `compare.png`는 나아지지 않는다 | VERIFY가 자기 수정에 관대한 경우다. `--verify both`로 뒤집어 보거나 `--verify human`으로 사람이 판정한다. |

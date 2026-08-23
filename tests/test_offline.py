@@ -874,6 +874,93 @@ def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None
 
 
 
+
+
+# ------------------------------ 13. VERIFY reasoning reaches the next PLAN
+
+def test_verify_feeds_next_plan(llm_base: str, renderer_url: str) -> None:
+    print("[13] VERIFY reasoning reaches the next PLAN")
+    import shutil
+
+    from pipeline import Pipeline, RoundResult
+
+    # --- the line itself
+    keep = RoundResult(2, "keep", reason="title size now matches",
+                       plan={"goal": "widen the main table"},
+                       verify={"reason": "title size now matches",
+                               "next_major_issue": "table column widths",
+                               "verified_by": "model"})
+    line = keep.history_line()
+    assert "next: table column widths" in line and "[model]" in line, line
+    assert "why:" not in line, "a kept round should not carry a revert reason"
+    ok(f"a kept round carries the model's remaining issue: {line}")
+
+    rev = RoundResult(3, "revert", reason="table became too wide",
+                      plan={"goal": "reduce the title font"},
+                      verify={"reason": "table became too wide",
+                              "next_major_issue": "header rule", "verified_by": "model"})
+    line = rev.history_line()
+    assert "why: table became too wide" in line, line
+    ok("a reverted round carries why it failed, so the next plan can avoid it")
+
+    human = RoundResult(4, "keep", reason="operator verdict",
+                        plan={"goal": "fix the header rule"},
+                        verify={"reason": "operator verdict",
+                                "next_major_issue": "제목 자간", "verified_by": "operator"})
+    assert "[operator] next: 제목 자간" in human.history_line(), human.history_line()
+    ok("a human verdict is attributed to the operator, not the model")
+
+    both = RoundResult(5, "keep", reason="looks closer",
+                       plan={"goal": "align the amounts"},
+                       verify={"reason": "looks closer", "next_major_issue": "",
+                               "operator_note": "우측 정렬 남음",
+                               "verified_by": "model+operator"})
+    assert "operator: 우측 정렬 남음" in both.history_line()
+    ok("an attached opinion travels alongside the model's own verdict")
+
+    # --- end to end: round 2's PLAN prompt must contain round 1's verdict
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 2
+
+    mock_services.LLMHandler.plan_calls = 0
+    out = ROOT / "out" / "history_flow"
+    if out.exists():
+        shutil.rmtree(out)
+    pipe = Pipeline(cfg, out)
+    plan_prompts: list[str] = []
+    original = pipe.llm.chat
+
+    def spy(messages, **kw):
+        if kw.get("stage") == "plan":
+            plan_prompts.extend(
+                part["text"] for part in messages[-1]["content"] if part["type"] == "text"
+            )
+        return original(messages, **kw)
+
+    pipe.llm.chat = spy
+    pipe.build(make_source_png(Path("tmp/source_fixture.png")))
+
+    assert len(plan_prompts) >= 2, len(plan_prompts)
+    first, second = plan_prompts[0], plan_prompts[1]
+    assert "Previous attempts" not in first, "round 1 has no history yet"
+    verdict = json.loads((out / "rounds" / "r01" / "verify.json").read_text())
+    remaining = verdict["next_major_issue"]
+    assert remaining, verdict
+    assert remaining in second, (
+        f"round 1's next_major_issue {remaining!r} never reached round 2's PLAN"
+    )
+    assert "[model]" in second, second[-400:]
+    ok(f"round 2's PLAN prompt carries round 1's verdict ({remaining!r})")
+
+    assert "the tag in brackets says who judged it" in second
+    ok("PLAN is told how to read the annotations")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -891,6 +978,7 @@ def main() -> int:
     test_human_verify(llm_base, renderer_url)
     test_ui_and_region()
     test_operator_only_and_region_loop(llm_base, renderer_url)
+    test_verify_feeds_next_plan(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

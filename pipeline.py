@@ -51,11 +51,36 @@ class RoundResult:
     error: str = ""
 
     def history_line(self) -> str:
+        """One short line for the next PLAN.
+
+        Carries forward what VERIFY concluded, not just the decision: why a
+        revert failed (so the next plan does not retry it) and what the verdict
+        thought was still wrong. Attributed, because a human's words and the
+        model's own carry different weight.
+        """
         goal = (self.plan.get("goal") or self.plan.get("target") or "edit").strip()
         goal = goal.replace("\n", " ")
         if len(goal) > 90:
             goal = goal[:90] + "..."
-        return f"Round {self.index}: {goal} -> {self.decision}"
+        line = f"Round {self.index}: {goal} -> {self.decision}"
+
+        def short(value) -> str:
+            return " ".join(str(value).split())[:80]
+
+        bits: list[str] = []
+        if self.decision == "revert" and self.reason:
+            bits.append(f"why: {short(self.reason)}")
+        remaining = str(self.verify.get("next_major_issue", "")).strip()
+        if remaining:
+            bits.append(f"next: {short(remaining)}")
+        note = str(self.verify.get("operator_note", "")).strip()
+        if note and note != self.reason.strip():
+            bits.append(f"operator: {short(note)}")
+
+        if bits:
+            judged = self.verify.get("verified_by") or "model"
+            line += f" [{judged}] " + "; ".join(bits)
+        return line
 
 
 class Pipeline:
@@ -722,13 +747,9 @@ class Pipeline:
                     verify=verdict,
                 )
             )
-            line = RoundResult(index, decision, plan=plan).history_line()
-            comment = str(verdict.get("operator_note", "")).strip()
-            if not comment and verdict.get("verified_by") == "operator":
-                comment = str(verdict.get("next_major_issue", "")).strip()
-            if comment:
-                line += f" (operator: {truncate(comment, 90)})"
-            history.append(line)
+            # Built from the round that was just recorded, so the verdict's own
+            # reasoning travels forward rather than being dropped here.
+            history.append(results[-1].history_line())
 
             if decision in ("keep", "done"):
                 current_html, current_png = candidate_html, candidate_png

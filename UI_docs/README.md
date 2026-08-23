@@ -194,6 +194,10 @@ python run.py build sample.png --ui --verify human
 "다음에 고칠 것"에 적은 내용은 **다음 라운드 PLAN의 history로 들어간다.** 판정을
 바꾸는 데서 끝나지 않고 다음 방향을 잡는다.
 
+Qwen이 판정한 경우도 같다 — Qwen이 낸 `reason`(되돌린 이유)과
+`next_major_issue`(남은 문제)가 다음 PLAN에 전달되고, 대괄호로 `[model]` /
+`[operator]` / `[model+operator]` 중 누가 판정했는지 표시된다.
+
 VERIFY 모델 호출(이미지 3장 + thinking ON)이 사라지므로 가장 비싼 호출이
 빠진다. 대신 매 라운드 사람이 붙어 있어야 한다.
 
