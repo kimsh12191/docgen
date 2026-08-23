@@ -63,6 +63,7 @@ pip install -r requirements.txt
 python run.py doctor                          # 두 서비스 점검
 python run.py doctor --llm-image              # 멀티모달 호출까지 확인
 python run.py render test.html -o test.png    # HTML -> PNG 단발 렌더
+python run.py render test.html --width 1000    # 렌더 폭을 바꿔서
 python run.py build sample.png -o out/sample  # 전체 loop 실행
 python run.py build sample.png --max-rounds 4 -v
 
@@ -404,6 +405,9 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `operator_notes` | 그 실행에 쓰인 운영자 메모 원문 |
 | `failed_attempts` | 시도했지만 안 된 접근 목록. 계속 쌓이면 같은 벽에 막혀 있다는 뜻 |
 
+나머지 필드는 그대로 읽으면 된다 — `source`, `out_dir`, `clone_html`,
+`clone_png`, `rounds_run`, `max_rounds`, 그리고 라운드별 상세가 담긴 `rounds`.
+
 건강한 실행은 `kept`가 대부분이고 `stop_reason`이 `done`이다.
 `reverted`가 섞이는 것은 정상이다 — VERIFY가 제 역할을 했다는 신호다.
 
@@ -462,9 +466,16 @@ Already tried without success:
 
 * **검증됨** — loop 로직(keep / revert / reject / done, 산출물 구조),
   patch 가드(없는·중복·no-op·잘못된 형식 edit 전부 거부), renderer `/probe`
-  계약과 `probe_js`의 실제 브라우저 동작, ACTION 출력 잘림 처리, 사람 개입
-  경로(메모 주입, PLAN 지시, VERIFY 오버라이드, `--verify human`)와 개입 기록.
-  `python3 tests/test_offline.py` 로 47개 검사가 재현된다.
+  계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
+  전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
+  지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
+  전달되는 경로. `python3 tests/test_offline.py` 로 87개 검사가 재현된다.
+* **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
+  7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
+  아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
+* **미검증(브라우저)** — 버튼 클릭과 영역 드래그는 자동 테스트에 없다.
+  Playwright로 직접 띄워 확인했고, 그 과정에서 모든 버튼이 동작하지 않던 결함이
+  나왔다. UI를 고치면 브라우저로 한 번 눌러보는 것이 필요하다.
 * **미검증** — 사내 Qwen이 이 프롬프트에 어떻게 반응하는지. 프롬프트 품질과
   수렴 속도는 실제 문서로 돌려봐야 안다. 위 "처음 실행할 때"의 3번을 짧게
   돌려서 `plan.json`·`verify.json`을 먼저 읽어보는 것을 권한다.
@@ -484,9 +495,9 @@ Already tried without success:
 | `config.py` | `config.toml` 로딩 |
 | `llm.py` | Qwen client (표준 `urllib`), message/image helper |
 | `renderer.py` | `/health` + `/probe` client와 probe script |
-| `prompts.py` | stage prompt 5종(bootstrap / plan / action-patch / action-rewrite / verify)과 운영자 메모·history 블록 |
-| `pipeline.py` | bootstrap, PLAN/ACTION/APPLY/RENDER/VERIFY loop, 사람 개입 지점 |
-| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출, patch edit 적용, 비교 이미지 합성 |
+| `prompts.py` | stage prompt 5종(bootstrap / plan / action-patch / action-rewrite / verify)과 운영자 메모·계약·영역·history·실패목록 블록 |
+| `pipeline.py` | bootstrap, PLAN/ACTION/APPLY/RENDER/VERIFY loop, 사람 개입 지점, 라운드 간 history·실패목록 |
+| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출, patch edit 적용, 비교 이미지 합성, 영역 crop |
 
 ## Renderer 계약
 
@@ -529,8 +540,8 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 47개가
-다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 87개가
+14개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -540,8 +551,16 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   거부하는지
 * renderer `/probe` 계약 위반 감지, `ok:false`가 예외를 던지는지
 * `chat_template_kwargs` 400 fallback (`retries=1` 포함)
-* 사람 개입 — 메모 주입, PLAN 지시, VERIFY 오버라이드, `--verify human`,
-  개입 기록의 정합성
+* 사람 개입 — 메모 주입, PLAN 첨부/교체/버리기, VERIFY 오버라이드/첨부,
+  `--verify human`, 개입 기록의 정합성(개입 횟수와 라운드 플래그가 일치하는지)
+* 검토 UI — 패널 좌표 계산, 출력 디렉터리 밖 파일·PNG 아닌 파일 거부, 질문
+  게시부터 답 수신까지 HTTP 왕복, 범위를 벗어난 영역 좌표 폐기, 실행 중 설정
+  전환이 다음 라운드에 반영되는지, `0.0.0.0` 바인딩이 접속 가능한 주소를
+  광고하는지
+* 영역 지정 — 비율 rect가 크기가 다른 이미지에 비례 적용되는지, ACTION이 확대
+  crop 2장을 함께 받는지, `compare_region.png` 가 생기는지
+* 라운드 간 전달 — VERIFY의 `reason`·`next_major_issue` 가 다음 PLAN 프롬프트에
+  실제로 도달하는지, history 창(3)을 넘어간 실패가 별도 목록으로 남는지
 
 ### 2. 실제 브라우저 렌더러 (Chromium 필요)
 

@@ -184,7 +184,7 @@ path, panels = side_by_side([("1. SOURCE", src), ("2. CURRENT RENDER", png)], ou
 | `pipeline.py` | `review_plan` / `review_verify` / `human_verify` 가 `choices` 를 선언하고 답을 해석 |
 | `utils.py` | `side_by_side` (패널 박스 포함), `crop_normalized` |
 | `run.py` | `--ui`, `--ui-host`, `--ui-port`, `--ui-timeout` |
-| `prompts.py` | 사람 개입이 있는 실행에 붙는 계약 블록, 영역 설명 블록 |
+| `prompts.py` | 사람 개입이 있는 실행에 붙는 계약 블록, 영역 설명 블록, history·실패목록 블록 |
 
 ---
 
@@ -226,6 +226,9 @@ UI 관련해 덮는 것:
   생기는지
 * `0.0.0.0` 바인딩이 접속 가능한 주소를 광고하는지
 * 실행 중 설정 전환이 파이프라인에 즉시 반영되는지, 잘못된 값을 무시하는지
+* 영역 지정이 ACTION의 확대 crop 2장과 `compare_region.png` 로 이어지는지
+
+전체는 87개 검사이고 UI·영역 관련이 그 중 두 그룹이다.
 
 브라우저 자체 동작(버튼 클릭, 드래그)은 자동 테스트에 없다. Playwright로 직접
 띄워 확인했고, 그 과정에서 실제 버그 두 개가 나왔다 — 인라인 `onclick` 의
