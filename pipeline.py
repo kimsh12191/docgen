@@ -50,6 +50,24 @@ class RoundResult:
     verify: dict = field(default_factory=dict)
     error: str = ""
 
+    #: Outcomes that mean the attempt did not land. An LLM error is not the
+    #: plan's fault, and an operator skip is not a failed approach.
+    FAILED_DECISIONS = ("revert", "rejected", "noop")
+
+    def failed_line(self) -> str | None:
+        """One line for the persistent 'already tried' list, or None."""
+        if self.decision not in self.FAILED_DECISIONS:
+            return None
+        goal = (self.plan.get("goal") or self.plan.get("target") or "edit").strip()
+        goal = " ".join(goal.split())[:90]
+        if self.decision == "noop":
+            why = "the edit produced no change"
+        elif self.decision == "rejected":
+            why = f"could not be applied ({' '.join(self.error.split())[:70]})"
+        else:
+            why = " ".join((self.reason or "judged worse").split())[:80]
+        return f"{goal} -> {self.decision}: {why}"
+
     def history_line(self) -> str:
         """One short line for the next PLAN.
 
@@ -167,7 +185,13 @@ class Pipeline:
 
     # ------------------------------------------------------------------ plan
 
-    def plan(self, source_png: Path, current_png: bytes, history: list[str]) -> dict:
+    def plan(
+        self,
+        source_png: Path,
+        current_png: bytes,
+        history: list[str],
+        failed: list[str] | None = None,
+    ) -> dict:
         """PLAN. Thinking ON. Images are the primary evidence."""
         text = prompts.PLAN_USER
         contract = prompts.operator_contract_block(self.operator_active)
@@ -179,6 +203,9 @@ class Pipeline:
         hist = prompts.history_block(history)
         if hist:
             text = f"{text}\n\n{hist}"
+        dead_ends = prompts.failed_block(failed or [])
+        if dead_ends:
+            text = f"{text}\n\n{dead_ends}"
 
         messages = [
             system_message(prompts.PLAN_SYSTEM),
@@ -580,7 +607,15 @@ class Pipeline:
 
         current_html, current_png = self.bootstrap(source_png)
         history: list[str] = []
+        # Persists for the whole run, unlike the 3-entry history window.
+        failed: list[str] = []
         results: list[RoundResult] = []
+
+        def record(result: RoundResult) -> None:
+            results.append(result)
+            line = result.failed_line()
+            if line and line not in failed:
+                failed.append(line)
         last_verify: dict = {}
         stop_reason = "max_rounds"
 
@@ -593,7 +628,7 @@ class Pipeline:
 
             # PLAN
             try:
-                plan = self.plan(source_png, current_png, history)
+                plan = self.plan(source_png, current_png, history, failed)
                 if self.interactive:
                     # Source next to the current render: what PLAN itself saw.
                     plan_view, plan_panels = side_by_side(
@@ -608,12 +643,12 @@ class Pipeline:
                     plan = self.review_plan(plan)
             except SkipRound as exc:
                 LOG.info("round %d: %s", index, exc)
-                results.append(RoundResult(index, "skipped", operator=True))
+                record(RoundResult(index, "skipped", operator=True))
                 history.append(f"Round {index}: skipped by the operator")
                 continue
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: PLAN failed: %s", index, exc)
-                results.append(RoundResult(index, "error", error=f"plan: {exc}"))
+                record(RoundResult(index, "error", error=f"plan: {exc}"))
                 write_json(rdir / "error.json", {"stage": "plan", "error": str(exc)})
                 continue
             write_json(rdir / "plan.json", plan)
@@ -624,7 +659,7 @@ class Pipeline:
                 action_raw = action_resp.content
             except LLMError as exc:
                 LOG.error("round %d: ACTION failed: %s", index, exc)
-                results.append(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "error", plan=plan, error=f"action: {exc}", operator=plan.get("planned_by", "model") != "model"))
                 write_json(rdir / "error.json", {"stage": "action", "error": str(exc)})
                 continue
             write_text(rdir / "action_raw.txt", action_raw)
@@ -646,7 +681,7 @@ class Pipeline:
                 candidate_html = self.apply(action_raw, current_html, mode=mode)
             except ValueError as exc:
                 LOG.warning("round %d: APPLY rejected the candidate: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "rejected", mode=mode, plan=plan, error=str(exc), operator=plan.get("planned_by", "model") != "model"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (invalid HTML)")
                 write_json(rdir / "error.json", {"stage": "apply", "error": str(exc)})
                 continue
@@ -654,7 +689,7 @@ class Pipeline:
 
             if candidate_html.strip() == current_html.strip():
                 LOG.warning("round %d: candidate is identical to current HTML; skipping", index)
-                results.append(RoundResult(index, "noop", mode=mode, plan=plan, operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "noop", mode=mode, plan=plan, operator=plan.get("planned_by", "model") != "model"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> no change produced")
                 continue
 
@@ -663,7 +698,7 @@ class Pipeline:
                 candidate_png, metrics = self.render(candidate_html)
             except RendererError as exc:
                 LOG.warning("round %d: candidate failed to render: %s", index, exc)
-                results.append(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "rejected", mode=mode, plan=plan, error=f"render: {exc}", operator=plan.get("planned_by", "model") != "model"))
                 history.append(f"Round {index}: {plan.get('goal', 'edit')} -> rejected (render failed)")
                 write_json(rdir / "error.json", {"stage": "render", "error": str(exc)})
                 continue
@@ -723,7 +758,7 @@ class Pipeline:
                         )
             except (LLMError, ValueError) as exc:
                 LOG.error("round %d: VERIFY failed: %s", index, exc)
-                results.append(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=plan.get("planned_by", "model") != "model"))
+                record(RoundResult(index, "error", mode=mode, plan=plan, error=f"verify: {exc}", operator=plan.get("planned_by", "model") != "model"))
                 write_json(rdir / "error.json", {"stage": "verify", "error": str(exc)})
                 continue
             write_json(rdir / "verify.json", verdict)
@@ -731,7 +766,7 @@ class Pipeline:
 
             decision = verdict["decision"]
             reason = str(verdict.get("reason", ""))
-            results.append(
+            record(
                 RoundResult(
                     index,
                     decision,
@@ -782,6 +817,7 @@ class Pipeline:
             "operator_notes": self.notes,
             "operator_interventions": self.interventions,
             "operator_rounds": sum(1 for r in results if r.operator),
+            "failed_attempts": failed,
             "verify_mode": self._base_verify_mode,
             "verify_mode_final": self.verify_mode,
             "thinking_control": self.llm.supports_thinking_flag,

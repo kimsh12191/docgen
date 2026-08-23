@@ -961,6 +961,103 @@ def test_verify_feeds_next_plan(llm_base: str, renderer_url: str) -> None:
 
 
 
+
+
+# --------------------- 14. failed attempts persist beyond the history window
+
+def test_failed_attempts_persist(llm_base: str, renderer_url: str) -> None:
+    print("[14] failed attempts outlive the 3-round history window")
+    import shutil
+
+    from pipeline import Pipeline, RoundResult
+
+    # Only outcomes that mean the attempt did not land are collected.
+    outcomes = {
+        "keep": None, "done": None, "error": None, "skipped": None,
+        "revert": "judged worse", "rejected": "could not be applied", "noop": "produced no change",
+    }
+    for decision, expect in outcomes.items():
+        r = RoundResult(1, decision, reason="", plan={"goal": "g"}, error="boom")
+        line = r.failed_line()
+        if expect is None:
+            assert line is None, f"{decision} should not count as a failed attempt: {line}"
+        else:
+            assert line and expect in line, (decision, line)
+    ok("only revert / rejected / noop become failed attempts")
+
+    # The window keeps 3 entries; the failed list keeps far more.
+    hist = prompts.history_block([f"Round {i}: g{i} -> keep" for i in range(1, 9)])
+    assert hist.count("- Round") == 3, hist
+    dead = prompts.failed_block([f"g{i} -> revert: why{i}" for i in range(1, 9)])
+    assert dead.count("\n- ") == 8, dead          # all eight kept
+    assert "g1 " in dead, "the oldest failure must survive"
+    trimmed = prompts.failed_block([f"g{i} -> revert: why{i}" for i in range(1, 12)])
+    assert trimmed.count("\n- ") == 8 and "g1 " not in trimmed, trimmed
+    assert "attack it a different way" in dead
+    ok("history stays at 3 entries while the failed list keeps 8")
+
+    assert prompts.failed_block([]) == ""
+    ok("no failed attempts adds nothing to the prompt")
+
+    # End to end: the mock's round 2 is rejected at APPLY. By round 5 that
+    # rejection has left the history window but must still be listed.
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 6
+
+    mock_services.LLMHandler.plan_calls = 0
+    out = ROOT / "out" / "failed_flow"
+    if out.exists():
+        shutil.rmtree(out)
+    pipe = Pipeline(cfg, out)
+    prompts_seen: list[str] = []
+    original = pipe.llm.chat
+
+    def spy(messages, **kw):
+        if kw.get("stage") == "plan":
+            prompts_seen.extend(
+                part["text"] for part in messages[-1]["content"] if part["type"] == "text"
+            )
+        return original(messages, **kw)
+
+    pipe.llm.chat = spy
+    summary = pipe.build(make_source_png(Path("tmp/source_fixture.png")))
+
+    assert summary["failed_attempts"], summary
+    ok(f"summary.json records what never worked: {summary['failed_attempts'][:1]}")
+
+    later = [p for p in prompts_seen if "Already tried without success" in p]
+    assert later, "the failed list never reached a PLAN prompt"
+    first_failure = summary["failed_attempts"][0]
+    goal = first_failure.split(" -> ")[0]
+    last = prompts_seen[-1]
+    assert "Already tried without success" in last, last[-500:]
+    assert goal in last, f"{goal!r} dropped out of the last PLAN prompt"
+    ok(f"the earliest failure is still listed in the last PLAN prompt ({goal!r})")
+
+    # The point of the list: a failure that has aged out of the recent history
+    # is still in front of PLAN. Composed directly so the proof does not depend
+    # on how many rounds the mock happens to run.
+    rounds = [
+        RoundResult(1, "revert", reason="table became too wide",
+                    plan={"goal": "widen the main table"}, verify={}),
+        RoundResult(2, "keep", plan={"goal": "fix the header rule"}, verify={}),
+        RoundResult(3, "keep", plan={"goal": "align the amounts"}, verify={}),
+        RoundResult(4, "keep", plan={"goal": "tighten the notes"}, verify={}),
+        RoundResult(5, "keep", plan={"goal": "pad the sheet"}, verify={}),
+    ]
+    window = prompts.history_block([r.history_line() for r in rounds])
+    dead_ends = prompts.failed_block([ln for ln in (r.failed_line() for r in rounds) if ln])
+    assert "widen the main table" not in window, "round 1 should have aged out"
+    assert "widen the main table" in dead_ends, dead_ends
+    assert "table became too wide" in dead_ends
+    ok("a failure that aged out of the history window is still listed with its reason")
+
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -979,6 +1076,7 @@ def main() -> int:
     test_ui_and_region()
     test_operator_only_and_region_loop(llm_base, renderer_url)
     test_verify_feeds_next_plan(llm_base, renderer_url)
+    test_failed_attempts_persist(llm_base, renderer_url)
     print(f"\n{len(PASS)} checks passed.")
     return 0
 

@@ -178,6 +178,26 @@ def notes_block(notes: str) -> str:
     return f"Notes from the operator about this document:\n{notes}\n\n{OPERATOR_NOTES_RULE}"
 
 
+FAILED_RULE = (
+    "These approaches were already tried and did not work.\n"
+    "Do not repeat the same approach. A goal listed here may still be a real\n"
+    "problem - if the current images show it, attack it a different way."
+)
+
+
+def failed_block(entries: list[str], limit: int = 8) -> str:
+    """Attempts that never landed, kept beyond the short history window.
+
+    Without this, an edit that was reverted five rounds ago falls out of the
+    recent history and gets proposed again.
+    """
+    recent = [e for e in entries if e][-limit:]
+    if not recent:
+        return ""
+    lines = "\n".join(f"- {e}" for e in recent)
+    return f"Already tried without success:\n{lines}\n\n{FAILED_RULE}"
+
+
 def history_block(entries: list[str], limit: int = 3) -> str:
     """Short recent-history block for PLAN. Empty string when there is none."""
     recent = [e for e in entries if e][-limit:]

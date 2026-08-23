@@ -402,6 +402,7 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `operator_rounds` | 사람 개입이 있었던 라운드 수 |
 | `skipped` | 사람이 건너뛴 라운드 수 |
 | `operator_notes` | 그 실행에 쓰인 운영자 메모 원문 |
+| `failed_attempts` | 시도했지만 안 된 접근 목록. 계속 쌓이면 같은 벽에 막혀 있다는 뜻 |
 
 건강한 실행은 `kept`가 대부분이고 `stop_reason`이 `done`이다.
 `reverted`가 섞이는 것은 정상이다 — VERIFY가 제 역할을 했다는 신호다.
@@ -417,6 +418,24 @@ Previous attempts:
 ```
 
 되돌린 이유가 함께 가므로 같은 시도를 반복하지 않는다.
+
+history는 최근 3라운드만 간다(명세 17절). 그래서 그 창을 넘어간 실패는 **별도
+목록으로 실행 내내 유지된다.**
+
+```
+Already tried without success:
+- widen the main table -> revert: table became too wide
+- tighten the title tracking -> rejected: could not be applied (edit 1 'find' is not in the document)
+```
+
+`revert`(렌더는 됐지만 더 나빠짐) · `rejected`(적용 실패) · `noop`(변화 없음)만
+들어간다. LLM 오류는 계획 탓이 아니고, 사람이 건너뛴 라운드는 실패한 접근이
+아니므로 제외한다. 최대 8개까지 유지되고 `summary.json` 의 `failed_attempts` 에
+남는다.
+
+프롬프트 문구는 "**같은 방식**을 반복하지 마라"다 — 목록에 오른 목표가 여전히
+진짜 문제일 수 있으니, 이미지에 보이면 **다른 방법으로** 접근하라고 한다.
+"그 문제를 건드리지 마라"가 아니다.
 
 라운드별로 더 파고들려면 `rounds/rNN/` 안을 본다. `plan.json`(무엇을 고치려
 했는지) → `patch.json` 또는 `action_raw.txt`(실제로 뭘 했는지) →
