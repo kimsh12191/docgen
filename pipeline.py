@@ -76,13 +76,14 @@ class Pipeline:
             raise ValueError(f"verify_mode must be model/human/both, got {verify_mode!r}")
         self.cfg = cfg
         self.notes = (notes or "").strip()
-        self.interactive = interactive
-        self.verify_mode = verify_mode
-        # Whether a person can actually intervene in this run. Gates the
-        # contract block so the default path's prompts stay unchanged.
-        self.operator_active = interactive or verify_mode != "model"
+        # What the run was started with. The UI may override these mid-run, so
+        # interactive / verify_mode are properties read once per round.
+        self._base_interactive = interactive
+        self._base_verify_mode = verify_mode
         # Anything with .ask(prompt, context) -> str. None means the terminal.
         self.prompter = prompter
+        if hasattr(prompter, "announce_defaults"):
+            prompter.announce_defaults(verify_mode, interactive)
         # Region the operator marked alongside their last answer, if any.
         self._last_region: dict | None = None
         self.interventions = 0
@@ -172,6 +173,25 @@ class Pipeline:
         return plan
 
     # ---------------------------------------------------------------- action
+
+    @property
+    def interactive(self) -> bool:
+        override = getattr(self.prompter, "plan_interactive_override", None)
+        return self._base_interactive if override is None else bool(override)
+
+    @property
+    def verify_mode(self) -> str:
+        return getattr(self.prompter, "verify_mode_override", None) or self._base_verify_mode
+
+    @property
+    def operator_active(self) -> bool:
+        """Gates the contract block: can a person intervene in this run at all?"""
+        return (
+            self._base_interactive
+            or self._base_verify_mode != "model"
+            or self.interactive
+            or self.verify_mode != "model"
+        )
 
     @staticmethod
     def action_mode(plan: dict) -> str:
@@ -738,7 +758,8 @@ class Pipeline:
             "operator_notes": self.notes,
             "operator_interventions": self.interventions,
             "operator_rounds": sum(1 for r in results if r.operator),
-            "verify_mode": self.verify_mode,
+            "verify_mode": self._base_verify_mode,
+            "verify_mode_final": self.verify_mode,
             "thinking_control": self.llm.supports_thinking_flag,
             "rounds": [
                 {

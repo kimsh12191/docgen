@@ -27,9 +27,15 @@ PAGE = """<!doctype html>
 <style>
  :root{color-scheme:light dark}
  body{margin:0;font:14px/1.5 system-ui,sans-serif;background:#f6f6f6;color:#111}
- header{background:#222;color:#fff;padding:10px 16px;display:flex;gap:14px;align-items:baseline}
+ header{background:#222;color:#fff;padding:10px 16px;display:flex;gap:14px;
+         align-items:center;flex-wrap:wrap}
  header b{font-size:15px}
  header span{opacity:.75;font-size:12px}
+ .ctl{margin-left:auto;display:flex;gap:14px;align-items:center;font-size:12px}
+ .ctl group{display:inline-flex;gap:4px}
+ .ctl b{font-size:12px;opacity:.7;font-weight:400;margin-right:4px}
+ .ctl button{font-size:12px;padding:3px 9px;background:#3a3a3a;color:#ddd;border-color:#555}
+ .ctl button.on{background:#1a5fb4;border-color:#1a5fb4;color:#fff}
  main{padding:16px;max-width:1600px}
  .card{background:#fff;border:1px solid #ddd;border-radius:6px;padding:14px;margin-bottom:14px}
  .stage{font-weight:700;font-size:16px;margin-bottom:8px}
@@ -60,7 +66,12 @@ PAGE = """<!doctype html>
    th{background:#262626}th,td{border-color:#333}
  }
 </style>
-<header><b>docgen review</b><span id="sub">connecting...</span></header>
+<header><b>docgen review</b><span id="sub">connecting...</span>
+  <div class="ctl">
+    <span><b>VERIFY 판정</b><span id="vm"></span></span>
+    <span><b>PLAN 개입</b><span id="pi"></span></span>
+  </div>
+</header>
 <main>
   <div class="card" id="panel"><div class="idle">대기 중...</div></div>
   <div class="card"><div class="stage">지난 라운드</div><div id="hist">아직 없음</div></div>
@@ -87,7 +98,38 @@ function send(value){
                    body: JSON.stringify({answer: v, region: sent})});
 }
 
+// --- 실행 중에 바꿀 수 있는 설정 -------------------------------------------
+const VERIFY_MODES = [
+  ['model', '모델만'], ['both', '모델 + 내가'], ['human', '나만 (모델 호출 안 함)'],
+];
+const PLAN_MODES = [[true, '받기'], [false, '안 받기']];
+
+function setConfig(patch){
+  fetch('config', {method:'POST', headers:{'Content-Type':'application/json'},
+                   body: JSON.stringify(patch)}).then(tick);
+}
+
+function renderControls(cfg){
+  const vm = document.getElementById('vm');
+  const pi = document.getElementById('pi');
+  const paint = (host, options, active, key) => {
+    if (host.dataset.active === String(active)) return;   // 깜빡임 방지
+    host.dataset.active = String(active);
+    host.innerHTML = '';
+    for (const [value, label] of options){
+      const b = document.createElement('button');
+      b.textContent = label;
+      if (value === active) b.className = 'on';
+      b.addEventListener('click', () => setConfig({[key]: value}));
+      host.appendChild(b);
+    }
+  };
+  paint(vm, VERIFY_MODES, cfg.verify_mode, 'verify_mode');
+  paint(pi, PLAN_MODES, cfg.plan_interactive, 'plan_interactive');
+}
+
 function render(st){
+  if (st.config) renderControls(st.config);
   document.getElementById('sub').textContent =
     st.finished ? '실행 종료' : (st.pending ? '입력 대기 중' : '모델이 작업 중...');
 
@@ -260,6 +302,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
         elif route == "/state":
             self._send(200, json.dumps(self.review.state()).encode("utf-8"), "application/json")
+        elif route == "/config":
+            self._send(200, json.dumps(self.review.config()).encode("utf-8"), "application/json")
         elif route == "/favicon.ico":
             # Browsers always ask; a 404 in the console is just noise.
             self._send(204, b"", "image/x-icon")
@@ -274,7 +318,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain")
 
     def do_POST(self):
-        if urllib.parse.urlparse(self.path).path.rstrip("/") != "/answer":
+        route = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if route == "/config":
+            try:
+                patch = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            except (ValueError, UnicodeDecodeError):
+                self._send(400, b'{"ok":false}', "application/json")
+                return
+            self.review.set_config(patch)
+            self._send(200, json.dumps(self.review.config()).encode("utf-8"), "application/json")
+            return
+        if route != "/answer":
             self._send(404, b"not found", "text/plain")
             return
         try:
@@ -312,6 +366,11 @@ class ReviewServer:
         self._history: list[dict] = []
         self._counter = 0
         self.finished = False
+        # None means "follow whatever the CLI was started with". The pipeline
+        # reads these before each PLAN and VERIFY, so they take effect live.
+        self.verify_mode_override: str | None = None
+        self.plan_interactive_override: bool | None = None
+        self._defaults = {"verify_mode": "model", "plan_interactive": False}
 
     # ------------------------------------------------------------ lifecycle
 
@@ -340,7 +399,34 @@ class ReviewServer:
                 "pending": self._pending,
                 "history": self._history[-12:],
                 "finished": self.finished,
+                "config": self.config(),
             }
+
+    def announce_defaults(self, verify_mode: str, plan_interactive: bool) -> None:
+        """What the run was started with, so the UI can show the live setting."""
+        self._defaults = {"verify_mode": verify_mode, "plan_interactive": bool(plan_interactive)}
+
+    def config(self) -> dict:
+        return {
+            "verify_mode": self.verify_mode_override or self._defaults["verify_mode"],
+            "plan_interactive": (
+                self._defaults["plan_interactive"]
+                if self.plan_interactive_override is None
+                else self.plan_interactive_override
+            ),
+        }
+
+    def set_config(self, patch) -> None:
+        if not isinstance(patch, dict):
+            return
+        mode = patch.get("verify_mode")
+        if mode in ("model", "both", "human"):
+            self.verify_mode_override = mode
+            LOG.info("UI: VERIFY 판정 주체를 %s 로 바꿨습니다", mode)
+        if "plan_interactive" in patch:
+            self.plan_interactive_override = bool(patch["plan_interactive"])
+            LOG.info("UI: PLAN 개입을 %s 로 바꿨습니다",
+                     "받기" if self.plan_interactive_override else "안 받기")
 
     def read_image(self, rel: str) -> bytes | None:
         """Only files inside out_dir are readable, whatever the query says."""

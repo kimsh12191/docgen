@@ -428,8 +428,7 @@ def test_operator(llm_base: str, renderer_url: str) -> None:
     ok("blank notes add nothing to the prompts")
 
     # --- interactive PLAN: replace the goal vs attach a note
-    pipe.interactive = True
-    pipe.operator_active = True
+    pipe._base_interactive = True
     pipe._ask = lambda *_a, **_k: "o 제목 크기부터 맞춰라"
     plan = pipe.review_plan({"scope": "local", "goal": "g"})
     assert plan["operator_instruction"] == "제목 크기부터 맞춰라", plan
@@ -769,6 +768,38 @@ def test_operator_only_and_region_loop(llm_base: str, renderer_url: str) -> None
 
     assert "planned_by" in prompts.operator_contract_block(True)
     ok("ACTION is told a plan may be the operator's alone")
+
+    # --- the UI can change the intervention mode mid-run
+    from ui import ReviewServer as RS
+
+    srv = RS(ROOT / "out", port=0)
+    live = Pipeline(cfg, ROOT / "out" / "x_probe", interactive=True,
+                    verify_mode="both", prompter=srv)
+    assert srv.config() == {"verify_mode": "both", "plan_interactive": True}, srv.config()
+    assert (live.interactive, live.verify_mode) == (True, "both")
+
+    srv.set_config({"verify_mode": "human"})
+    assert live.verify_mode == "human", live.verify_mode
+    srv.set_config({"plan_interactive": False})
+    assert live.interactive is False
+    ok("a mode change in the UI reaches the next round of the running pipeline")
+
+    srv.set_config({"verify_mode": "model"})
+    assert (live.interactive, live.verify_mode) == (False, "model")
+    # The contract stays: the run began with a human in it.
+    assert live.operator_active is True
+    ok("switching everything off goes fully automatic without dropping the contract")
+
+    srv.set_config({"verify_mode": "nope"})
+    assert live.verify_mode == "model", "an unknown mode must be ignored"
+    srv.set_config("not a dict")
+    assert live.verify_mode == "model"
+    ok("invalid config payloads are ignored")
+
+    # No prompter at all: the CLI values stand and nothing raises.
+    plain = Pipeline(cfg, ROOT / "out" / "x_probe", interactive=True, verify_mode="both")
+    assert (plain.interactive, plain.verify_mode) == (True, "both")
+    ok("with no prompter the pipeline just follows its start values")
 
     # --- the UI can bind somewhere another machine can reach
     ip = lan_ip()

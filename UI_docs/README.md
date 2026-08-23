@@ -20,7 +20,8 @@
 * [시나리오 C — Qwen 계획 버리고 사람 지시대로](#시나리오-c--qwen-계획-버리고-사람-지시대로)
 * [시나리오 D — 특정 영역만 고치기](#시나리오-d--특정-영역만-고치기)
 * [시나리오 E — VERIFY를 사람이 직접](#시나리오-e--verify를-사람이-직접)
-* [시나리오 F — 다른 PC에서 접속](#시나리오-f--다른-pc에서-접속)
+* [시나리오 F — 실행 중에 개입 방식 바꾸기](#시나리오-f--실행-중에-개입-방식-바꾸기)
+* [시나리오 G — 다른 PC에서 접속](#시나리오-g--다른-pc에서-접속)
 * [버튼 정리](#버튼-정리)
 * [기록되는 것](#기록되는-것)
 * [알아둘 제약](#알아둘-제약)
@@ -86,7 +87,12 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 * VERIFY에서도 같은 방식으로 판정은 그대로 두고 의견만 붙일 수 있다. 그
   의견은 **다음 라운드 PLAN의 history로 실려 간다.**
 
-![지난 라운드 기록](images/04-history.png)
+![개입 버튼](images/02-plan-intervene.png)
+
+입력창에 적고 **`의견 첨부 (Qwen + 사람)`** 를 누른다. 위 화면의 버튼 5개가
+PLAN에서 할 수 있는 전부다 — 시나리오 C도 이 화면의 네 번째 버튼이다.
+
+![지난 라운드 기록](images/08-history.png)
 
 아래 카드에 무엇을 보냈는지 쌓인다. 영역까지 지정한 답에는 `[영역 지정]` 이
 붙는다.
@@ -95,8 +101,10 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 
 ## 시나리오 C — Qwen 계획 버리고 사람 지시대로
 
-모델이 엉뚱한 걸 집었을 때. 지시를 적고 **`Qwen 계획 버리고 사람 의견만`** 을
-누른다.
+모델이 엉뚱한 걸 집었을 때. **CLI 옵션이 아니라 PLAN 화면의 버튼이다.**
+([시나리오 B 화면](images/02-plan-intervene.png)의 네 번째 버튼)
+
+지시를 적고 **`Qwen 계획 버리고 사람 의견만`** 을 누른다.
 
 * 모델 계획을 **버린다.** ACTION은 사람 지시만 목표로 본다.
 * 원래 계획은 `plan.json` 의 `model_plan` 에 기록만 남는다. 프롬프트에
@@ -112,7 +120,7 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 
 "이 표만 원본에 맞춰라" 처럼 한 부분을 지목할 때. **이미지 위를 드래그**한다.
 
-![영역 지정](images/02-plan-region-select.png)
+![영역 지정](images/03-plan-region-select.png)
 
 드래그하면 아래에 선택 결과가 뜬다.
 
@@ -130,7 +138,7 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
    말라"가 들어간다.
 4. VERIFY 화면에 **지정한 영역 확대 비교**가 추가로 뜬다.
 
-![VERIFY + 영역 확대](images/03-verify-with-region.png)
+![VERIFY + 영역 확대](images/04-verify-with-region.png)
 
 위가 전체 페이지(원본 · 수정 전 · 수정 후), 아래가 **지정한 영역만 확대**한
 것이다. 전체만 보면 작은 영역이 고쳐졌는지 알 수 없어서 두 장을 같이 준다.
@@ -145,17 +153,25 @@ PLAN 실행(모델) → [화면 ①] → ACTION → APPLY → RENDER → VERIFY 
 
 ## 시나리오 E — VERIFY를 사람이 직접
 
-모델 판정을 아예 믿지 않을 때. Qwen을 호출하지 않는다.
+판정을 사람이 하는 방법은 두 가지다.
+
+**① 모델 판정을 보고 뒤집기** — 그냥 UI 버튼이다. VERIFY 화면의
+`keep / revert / done 으로 교체`. 모델 판정을 화면에서 먼저 읽고 바꾼다.
+모델의 원래 판정은 `model_decision` 에 남는다.
+
+**② Qwen에게 아예 묻지 않기** — 모델 호출 자체를 건너뛴다. 실행할 때 지정해도
+되고, [시나리오 F](#시나리오-f--실행-중에-개입-방식-바꾸기) 처럼 **실행 중에
+화면에서 바꿔도 된다.**
 
 ```bash
 python run.py build sample.png --ui --verify human
 ```
 
-![사람 판정](images/05-verify-human-decision.png)
+![사람 판정](images/06-verify-human-decision.png)
 
 판정 버튼만 있고 입력창이 없다. 고르면 이유와 다음 이슈를 차례로 묻는다.
 
-![이유 입력](images/06-verify-human-reason.png)
+![이유 입력](images/07-verify-human-reason.png)
 
 "다음에 고칠 것"에 적은 내용은 **다음 라운드 PLAN의 history로 들어간다.** 판정을
 바꾸는 데서 끝나지 않고 다음 방향을 잡는다.
@@ -165,7 +181,30 @@ VERIFY 모델 호출(이미지 3장 + thinking ON)이 사라지므로 가장 비
 
 ---
 
-## 시나리오 F — 다른 PC에서 접속
+## 시나리오 F — 실행 중에 개입 방식 바꾸기
+
+처음에는 지켜보다가 "이제 내가 판정하겠다"로 바꾸거나, 반대로 "나머지는 알아서
+돌려라"로 빠질 때. **다시 실행할 필요 없이 화면 오른쪽 위에서 바꾼다.**
+
+![실행 중 전환](images/05-switch-verify-mode.png)
+
+| 컨트롤 | 선택지 | 뜻 |
+| --- | --- | --- |
+| VERIFY 판정 | 모델만 | 사람에게 묻지 않고 모델 판정대로 진행 |
+| | 모델 + 내가 | 모델이 판정하고 사람이 보고 뒤집을 수 있음 |
+| | 나만 (모델 호출 안 함) | Qwen VERIFY 호출을 건너뛰고 사람만 판정 |
+| PLAN 개입 | 받기 / 안 받기 | PLAN에서 멈출지 |
+
+바꾸면 **다음 PLAN·VERIFY부터** 적용된다. 진행 중인 질문에는 영향이 없다.
+현재 어떤 설정인지는 파란색으로 표시된다.
+
+둘 다 끄면(`모델만` + `안 받기`) 그 시점부터 완전 자동으로 돈다. 브라우저는
+그냥 진행 상황을 보는 창이 된다.
+
+`summary.json` 에는 시작할 때의 설정(`verify_mode`)과 끝날 때의 설정
+(`verify_mode_final`)이 모두 남는다.
+
+## 시나리오 G — 다른 PC에서 접속
 
 파이프라인은 GPU 서버에서 돌고, 화면은 윈도우에서 볼 때.
 
@@ -197,6 +236,9 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 | Qwen 계획 버리고 사람 의견만 | 계획을 버림 | `planned_by: operator`, `model_plan` |
 | 라운드 건너뛰기 | 이 라운드를 통째로 넘김 | `decision: skipped` |
 
+헤더의 컨트롤은 언제든 눌러 개입 방식 자체를 바꾼다
+([시나리오 F](#시나리오-f--실행-중에-개입-방식-바꾸기)).
+
 ### VERIFY 화면 (모델이 판정한 경우)
 
 | 버튼 | 결과 | 남는 것 |
@@ -226,7 +268,7 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 | --- | --- |
 | `rounds/rNN/plan.json` | `planned_by`, `operator_note`, `operator_instruction`, `operator_region`, `model_plan` |
 | `rounds/rNN/verify.json` | `verified_by`, `model_decision`, `operator_override`, `operator_note` |
-| `summary.json` | `verify_mode`, `operator_interventions`, `operator_rounds`, `skipped`, 라운드별 `operator` |
+| `summary.json` | `verify_mode`(시작 설정), `verify_mode_final`(종료 시점 설정), `operator_interventions`, `operator_rounds`, `skipped`, 라운드별 `operator` |
 
 모델 단독 성능을 보려면 `--ui` 없이 돌린 실행을 보고, 개입이 섞인 실행에서는
 `operator: true` 라운드를 빼고 읽는다.
@@ -258,6 +300,8 @@ python run.py build sample.png --ui --ui-host 0.0.0.0 --ui-port 8900
 * **터치는 안 된다.** 드래그가 마우스 이벤트 기반이라 모바일에서는 영역 지정이
   동작하지 않는다.
 * **실행 시작·중단은 CLI에서** 한다. UI에는 시작 버튼도 정지 버튼도 없다.
+  개입 방식(판정 주체, PLAN 개입 여부)은 실행 중에 바꿀 수 있지만, 라운드 수나
+  대상 문서 같은 것은 바꿀 수 없다.
 * **인증이 없다.** `--ui-host` 로 열 때는 사내망 안이라는 전제가 필요하다.
 * 답이 `--ui-timeout`(기본 1800초) 안에 오지 않으면 입력 없음으로 처리한다.
   사람이 단독 판정하는 모드였다면 `revert` 가 된다 — 판정되지 않은 수정을

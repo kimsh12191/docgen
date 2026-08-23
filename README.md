@@ -139,10 +139,14 @@ python run.py build sample.png --ui
 | 의견 첨부 | Qwen 판단 + 사람 의견 |
 | (PLAN) 계획 교체 | Qwen 계획은 남기고 사람 지시를 우선 |
 | (PLAN) Qwen 계획 버리고 사람 의견만 | Qwen 계획을 **버린다**. `model_plan`에 기록만 남고 ACTION은 사람 지시만 본다 |
+| 헤더의 `VERIFY 판정` / `PLAN 개입` | **실행 중에** 개입 방식을 바꾼다. 다음 라운드부터 적용 |
 | (VERIFY) keep / revert / done | Qwen 판정을 사람 판정으로 교체 |
 | `--verify human` | VERIFY에 Qwen을 아예 호출하지 않는다 |
 
 어느 쪽이든 **Qwen이 뭐라고 했는지 화면에서 먼저 본 다음** 고를 수 있다.
+`--verify` 는 시작값일 뿐이고, 화면 오른쪽 위에서 실행 중에 바꿀 수 있다 —
+"이제부터 내가 판정" 또는 "나머지는 알아서 돌려라" 둘 다 다시 실행하지 않고
+된다.
 
 화면에 나오는 것:
 
@@ -391,7 +395,8 @@ stdin이 터미널이 아니면(배치·cron·CI) `--interactive`는 경고를 �
 | `errors` | LLM 호출 자체가 실패한 라운드 수 |
 | `mode` | 그 라운드가 `patch`였는지 `rewrite`였는지 |
 | `thinking_control` | `false`면 서버가 `chat_template_kwargs`를 거부해 stage별 thinking 제어 없이 돌았다는 뜻 |
-| `verify_mode` | 그 실행에서 VERIFY를 누가 했는가: `model` / `both` / `human` |
+| `verify_mode` | 시작할 때의 VERIFY 방식: `model` / `both` / `human` |
+| `verify_mode_final` | 끝날 때의 방식. 다르면 실행 중에 바꾼 것이다 |
 | `operator_interventions` | 사람이 PLAN에 지시를 넣거나, VERIFY 판정을 뒤집거나, 직접 판정한 횟수. `0`이면 모델 단독 실행 |
 | `operator_rounds` | 사람 개입이 있었던 라운드 수 |
 | `skipped` | 사람이 건너뛴 라운드 수 |

@@ -84,6 +84,8 @@ WebSocket이 아니라 **1초 폴링**이다. 표준 라이브러리만 쓰기�
 | `GET /` | 페이지 (HTML·CSS·JS 한 덩어리, 외부 리소스 없음) |
 | `GET /state` | `{pending, history, finished}` — 브라우저가 1초마다 폴링 |
 | `POST /answer` | `{answer, region}` |
+| `GET /config` | 현재 개입 설정 |
+| `POST /config` | `{verify_mode, plan_interactive}` — 실행 중 전환 |
 | `GET /img?p=<상대경로>` | 실행 출력 디렉터리 안의 PNG |
 | `GET /favicon.ico` | 204 (브라우저가 항상 요청하므로 콘솔 잡음 제거) |
 
@@ -111,6 +113,32 @@ UI는 아무 판단도 하지 않는다. **버튼 목록조차 파이프라인�
 파싱 분기 한 곳으로 끝난다.
 
 ---
+
+## 실행 중 설정 전환
+
+`--verify` 와 `--interactive` 는 실행 시작값일 뿐이다. UI가 바꾸면 **다음
+라운드부터** 적용된다.
+
+```python
+# pipeline.py — 생성 시점에 고정하지 않고 라운드마다 읽는다
+@property
+def verify_mode(self) -> str:
+    return getattr(self.prompter, "verify_mode_override", None) or self._base_verify_mode
+
+@property
+def interactive(self) -> bool:
+    override = getattr(self.prompter, "plan_interactive_override", None)
+    return self._base_interactive if override is None else bool(override)
+```
+
+`getattr` 기본값을 쓰는 이유: 터미널로 돌 때는 `prompter` 가 `None` 이고, 그
+경우 그냥 시작값을 따른다. UI가 없어도 이 코드가 그대로 동작한다.
+
+서버는 `announce_defaults()` 로 시작값을 전달받아 UI에 현재 설정을 표시한다.
+`verify_mode` 로 허용되지 않는 값이 오면 무시한다.
+
+`summary.json` 에는 `verify_mode`(시작)와 `verify_mode_final`(종료 시점)이 모두
+남아서, 중간에 방식이 바뀐 실행을 나중에 구분할 수 있다.
 
 ## 영역 좌표 변환
 
@@ -165,6 +193,11 @@ path, panels = side_by_side([("1. SOURCE", src), ("2. CURRENT RENDER", png)], ou
 **버튼을 추가한다** → `pipeline.py` 의 해당 `ctx["choices"]` 에 한 줄 넣고, 그
 값을 답 파싱 분기에 추가한다. `ui.py` 는 건드리지 않는다.
 
+**실행 중 바꿀 설정을 추가한다** → `ReviewServer` 에 `*_override` 속성과
+`config()` / `set_config()` 항목을 넣고, 파이프라인 쪽에서 `getattr` 로 읽는
+property 를 만든다. UI 헤더의 컨트롤은 `VERIFY_MODES` 처럼 배열 하나로
+정의된다.
+
 **새 단계에 개입 지점을 만든다** → 그 단계에서 `self._ask(프롬프트, ctx)` 를
 부르고 `ctx` 에 `title` / `data` / `image` / `choices` 를 채운다.
 
@@ -192,6 +225,7 @@ UI 관련해 덮는 것:
 * 영역을 지정한 라운드에서 ACTION이 이미지 4장을 받고 `compare_region.png` 가
   생기는지
 * `0.0.0.0` 바인딩이 접속 가능한 주소를 광고하는지
+* 실행 중 설정 전환이 파이프라인에 즉시 반영되는지, 잘못된 값을 무시하는지
 
 브라우저 자체 동작(버튼 클릭, 드래그)은 자동 테스트에 없다. Playwright로 직접
 띄워 확인했고, 그 과정에서 실제 버그 두 개가 나왔다 — 인라인 `onclick` 의
