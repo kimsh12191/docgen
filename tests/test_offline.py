@@ -82,6 +82,23 @@ def test_renderer_smoke() -> str:
     assert any("renderer smoke test" in t for t in texts), texts
     ok("metrics carry page box + element bboxes")
 
+    # The real renderer answers /health with a plain status line, not JSON.
+    # Requiring JSON here used to reject a working service.
+    mock_services.RendererHandler.health_body = (
+        b"ok chromium=129.0.6668.29 korean_fonts=103 ['Batang', 'Dotum']"
+    )
+    try:
+        info = client.health()
+        assert info["ok"] is True, info
+        assert "chromium=129.0.6668.29" in info["status"], info
+        ok("plain-text /health accepted, status line surfaced")
+    finally:
+        mock_services.RendererHandler.health_body = None
+
+    # A JSON body that says otherwise is still honoured.
+    assert client.health().get("ok") is True
+    ok("JSON /health still works and ok:false still fails")
+
     # Failure contract: ok:false must raise, not return junk.
     try:
         client.probe("", width=800)

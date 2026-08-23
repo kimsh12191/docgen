@@ -100,7 +100,8 @@ class RendererClient:
 
     # ------------------------------------------------------------------ http
 
-    def _request(self, path: str, payload: dict | None = None) -> dict:
+    def _fetch(self, path: str, payload: dict | None = None) -> bytes:
+        """Raw body of a GET (payload=None) or JSON POST. Raises RendererError."""
         url = f"{self.base_url}{path}"
         if payload is None:
             req = urllib.request.Request(url, method="GET")
@@ -127,6 +128,11 @@ class RendererClient:
             # e.g. the renderer dropping the connection mid-request.
             raise RendererError(f"{path} transport failure: {type(exc).__name__}: {exc}") from exc
 
+        return raw
+
+    def _request(self, path: str, payload: dict | None = None) -> dict:
+        """A response the contract says is JSON. Only /probe is in that group."""
+        raw = self._fetch(path, payload)
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -135,12 +141,34 @@ class RendererClient:
     # ------------------------------------------------------------------- api
 
     def health(self) -> dict:
-        """GET /health. Raises RendererError when the service is not usable."""
-        data = self._request("/health")
-        if isinstance(data, dict) and data.get("ok") is False:
-            raise RendererError(f"/health reported not ok: {data}")
-        LOG.debug("renderer health: %s", data)
-        return data if isinstance(data, dict) else {"raw": data}
+        """GET /health.
+
+        The response format is not part of the contract -- a real renderer
+        answers with a plain status line like
+        "ok chromium=129.0.6668.29 korean_fonts=103 [...]". So reaching the
+        service with a 2xx is what "healthy" means here; a JSON body saying
+        otherwise is still honoured. Requiring JSON here used to reject a
+        perfectly working renderer.
+        """
+        raw = self._fetch("/health")
+        text = raw.decode("utf-8", "replace").strip()
+
+        try:
+            data = json.loads(text)
+        except (ValueError, TypeError):
+            data = None
+
+        if isinstance(data, dict):
+            if data.get("ok") is False:
+                raise RendererError(f"/health reported not ok: {data}")
+            out = dict(data)
+            out.setdefault("ok", True)
+            out.setdefault("status", text[:300])
+            LOG.debug("renderer health (json): %s", data)
+            return out
+
+        LOG.debug("renderer health (text): %s", text[:300])
+        return {"ok": True, "status": text[:300]}
 
     def probe(
         self,

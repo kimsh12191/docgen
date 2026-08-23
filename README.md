@@ -515,6 +515,18 @@ Already tried without success:
 그 밖의 경우는 모두 `RendererError`를 발생시킨다. 이 프로젝트는 자체 브라우저를
 띄우지 않는다.
 
+`GET /health` 는 **응답 형식을 가정하지 않는다.** 실제 서버는 JSON이 아니라 평문
+상태줄을 돌려준다.
+
+```
+ok chromium=129.0.6668.29 korean_fonts=103 ['Batang', 'BatangChe', 'Dotum', ...]
+```
+
+그래서 여기서는 **2xx로 응답이 오면 정상**으로 본다. JSON이면서 `ok: false` 인
+경우는 실패로 처리한다. 상태줄은 `doctor` 와 `build` 시작 시 그대로 출력하니
+Chromium 버전과 설치된 폰트를 확인할 수 있다. 본문 텍스트에서 오류 키워드를
+찾지는 않는다 — `errors=0` 같은 정상 상태줄을 오탐하게 된다.
+
 ## Thinking 제어
 
 thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한다.

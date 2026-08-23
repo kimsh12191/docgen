@@ -81,6 +81,8 @@ def rasterise(html: str, width: int, device_scale: float) -> tuple[bytes, dict]:
 
 class RendererHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    #: The real service answers /health with a plain status line, not JSON.
+    health_body = None  # bytes -> served verbatim; None -> JSON
 
     def log_message(self, *args):  # silence
         pass
@@ -95,6 +97,14 @@ class RendererHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
+            if RendererHandler.health_body is not None:
+                body = RendererHandler.health_body
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             self._send(200, {"ok": True, "service": "mock-renderer"})
         else:
             self._send(404, {"ok": False, "error": "not found"})

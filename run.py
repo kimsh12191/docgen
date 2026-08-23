@@ -50,8 +50,11 @@ def cmd_doctor(args, cfg) -> int:
     )
     renderer_up = False
     try:
-        renderer.health()
-        print(f"OK {cfg.renderer.url}")
+        info = renderer.health()
+        status = str(info.get("status", "")).strip()
+        # The status line carries the Chromium build and installed fonts; worth
+        # seeing, and the only place an odd 200 response would show up.
+        print(f"OK {cfg.renderer.url}" + (f"  {status[:160]}" if status else ""))
         renderer_up = True
     except RendererError as exc:
         print(f"FAIL {exc}")
@@ -204,7 +207,9 @@ def cmd_build(args, cfg) -> int:
         device_scale=cfg.renderer.device_scale,
     )
     try:
-        renderer.health()
+        status = str(renderer.health().get("status", "")).strip()
+        if status:
+            print(f"renderer: {status[:160]}")
     except RendererError as exc:
         print(f"오류: renderer health 검사에 실패해서 빌드를 시작하지 않습니다: {exc}", file=sys.stderr)
         return 1
