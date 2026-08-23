@@ -3,31 +3,51 @@
 문서 PNG 한 장을 입력하면, 사람이 원본과 나란히 놓고 봤을 때 최대한 같아 보이는
 **편집 가능한 HTML**을 만든다.
 
-핵심은 하나의 loop뿐이다. Qwen VLM이 실제 렌더 결과를 직접 보면서 판단한다.
+구조는 두 부분이다. **첫 초안을 만드는 3단계**, 그리고 **그것을 다듬는 하나의
+loop**. 어느 쪽이든 Qwen VLM이 실제 렌더 결과를 직접 보면서 판단한다.
 
 ```
 SOURCE PNG
-   |
-   +-- BOOTSTRAP (3단계) ------------------------------------------+
-   |     1. SKELETON  축소한 원본만 보고 구조만 만든다              |
-   |     2. CHECK     축소한 원본 vs 축소한 렌더, 육안 대조 + 1회 수정 |
-   |     3. FILL      표시된 블록을 하나씩 순서대로 채운다           |
-   +--------------------------------------------------------------+
-   |
-   v  INITIAL HTML -> RENDER
-                                |
-        +-----------------------+
+  |
+  |  === 1부: 첫 HTML 만들기 (BOOTSTRAP) ===============================
+  |
+  +--> 1. SKELETON   축소한 원본 1장 (700px)          thinking OFF
+  |       구조만 만든다. 글자는 블록당 몇 단어.
+  |       블록마다 <section data-block="N" data-role="...">
+  |            |
+  |            v  RENDER
+  |
+  +--> 2. CHECK      축소한 원본 + 축소한 렌더 2장     thinking ON
+  |       "눈을 가늘게 뜨고 봤을 때 같은 페이지인가"
+  |       아니면 -> FIX 1회 -> RENDER
+  |            |
+  |            v
+  |
+  +--> 3. FILL       원해상도 원본 + 현재 렌더         thinking OFF
+          블록 1개씩 순서대로 채운다 -> 매번 RENDER
+               |
+               v
+          INITIAL HTML
+               |
+  |  === 2부: 다듬기 (최대 max_rounds 라운드) ==========================
+               |
+        +------+
         v
-      PLAN   (VLM, thinking ON)   가장 중요한 불일치 하나를 고른다
-      ACTION (VLM, thinking OFF)  patch 또는 HTML 전문으로 수정한다
-      APPLY  (Python)             patch 적용 또는 fence 제거 + sanity check
+      PLAN   (VLM, thinking ON)   가장 중요한 불일치 하나. scope = local|section|global
+        |                          -> [사람 개입 지점 1] 3가지 중 선택
+      ACTION (VLM, thinking OFF)  scope에 따라 patch / section / rewrite
+      APPLY  (Python)             치환·구간교체·fence 제거 + sanity check
       RENDER (외부 renderer)      HTML -> PNG
-      VERIFY (VLM 또는 사람)      keep / revert / done
-        |
+      VERIFY (VLM, thinking ON)   keep / revert / done
+        |                          -> [사람 개입 지점 2] 3가지 중 선택
         +-> keep   -> candidate 채택, 다음 PLAN
             revert -> 이전 HTML 복원, 다음 PLAN
             done   -> clone.html
 ```
+
+사람 개입은 `--ui` 로 켠다. 지점은 **PLAN 직후와 VERIFY 직후 두 곳뿐**이고,
+각각 선택지가 셋이다(그대로 / 의견 첨부 / 내 것으로 교체). bootstrap 3단계에는
+개입 지점이 없다.
 
 CV 파이프라인, heuristic rule 모음, 구조물별 action 타입은 없다. VLM이 원본과
 실제 렌더를 비교해서 HTML을 직접 고치고, 그 수정 결과를 새로 렌더해서 스스로
@@ -131,6 +151,7 @@ python run.py render test.html -o test.png    # HTML -> PNG 단발 렌더
 python run.py render test.html --width 1000    # 렌더 폭을 바꿔서
 python run.py build sample.png -o out/sample  # 전체 loop 실행
 python run.py build sample.png --max-rounds 4 -v
+python run.py build sample.png --bootstrap single   # 첫 HTML을 1회 호출로 (싸게)
 
 # 사람이 개입하는 방식 (아래 "사람이 개입하기" 참고)
 python run.py build sample.png --note "표 정렬이 가장 중요하다"
@@ -149,9 +170,13 @@ python run.py build sample.png --interactive
 2. `python run.py doctor --llm-image` — 이미지를 실제로 보내 멀티모달 호출이
    되는지 확인한다.
 3. `python run.py build sample.png -o out/sample --max-rounds 2 -v` — 짧게
-   먼저 돌려서 프롬프트가 먹히는지 본다. `rounds/r01/compare.png` 로 실제로
-   나아졌는지 눈으로 보고, `plan.json`·`verify.json` 이 말이 되는 내용이면
-   라운드를 늘린다.
+   먼저 돌려서 프롬프트가 먹히는지 본다. 볼 것은 **이 순서**다.
+   1. `rounds/bootstrap_skeleton.png` 과 원본 — **구조가 닮았나.** 여기가
+      틀리면 그 아래 전부 틀린다. `bootstrap_stages.json` 의 `skeleton.blocks`
+      가 `0`이면 블록 표시를 안 해서 채우기 단계를 건너뛴 것이다.
+   2. `rounds/bootstrap.png` 과 원본 — 블록이 채워진 첫 초안.
+   3. `rounds/r01/compare.png` — 루프가 실제로 나아지게 하는지.
+   4. `plan.json` · `verify.json` 이 말이 되는 내용인지.
 4. `python run.py build sample.png -o out/sample` — 기본 8라운드.
 
 ## 산출물
@@ -183,7 +208,8 @@ out/sample/
 `compare.png`는 원본·수정 전·수정 후를 나란히 붙인 이미지로, 사람이 판정할 때
 쓴다. `compare_region.png`는 영역을 지정한 라운드에만, `plan_view.png`는 사람이
 개입하는 실행에만 생긴다.
-`patch.json`은 patch 모드 라운드에만 생긴다. APPLY나 RENDER에서 실패한 라운드는
+`patch.json`은 `patch`·`section` 모드 라운드에만 생긴다(모델이 돌려준 JSON 원문
+그대로다). APPLY나 RENDER에서 실패한 라운드는
 `candidate.png` 대신 `error.json`을 남기고, 현재 HTML은 건드리지 않는다.
 `summary.json`은 라운드별로 ACTION 모드(`mode`)와 사람 개입 여부(`operator`)를
 함께 기록한다.
@@ -366,10 +392,13 @@ python run.py build sample.png --interactive
 PLAN 직후와(`--verify both` 면) VERIFY 직후에 멈춘다. `--verify` 를 따로 주지
 않으면 `both` 가 된다.
 
-개입 방식은 **어느 단계에서든 두 가지**다.
+선택지는 **어느 단계에서든 세 개**다. 그 사이는 없다.
 
-* **뒤집기** — 모델 판단을 사람 것으로 갈아치운다
-* **첨부** — 모델 판단을 그대로 두고 사람 의견을 붙인다
+| | | 남는 것 |
+| --- | --- | --- |
+| ① | Qwen 결과 그대로 | — |
+| ② | Qwen 결과 유지 + 내 의견 **첨부** | `operator_note` |
+| ③ | Qwen 결과 **버리고** 내 것으로 | `operator_instruction`(PLAN) / `operator_override`(VERIFY), 버려진 것은 `model_plan` / `model_decision` 에 보존 |
 
 **PLAN**
 
@@ -409,10 +438,16 @@ written by a person, not by you:
   plan's own goal. Do what it says instead.
 - "operator_note" in the plan: a human comment to take into account WITHOUT
   discarding the plan.
+- a plan with "planned_by": "operator": the human discarded the model's own
+  plan. What the model had proposed is kept under "model_plan" for reference
+  only - do not act on it.
+- "operator_region" in the plan: a human marked one area of the page. Confine
+  the edit to it; two extra images zoom in on that area.
 - a history line marked (operator: ...): a human comment on an earlier round.
-The operator is looking at the same images you are. Prefer their input over your
-own earlier reasoning, but never over what the current images plainly show. If
-their input contradicts the images, say so rather than following it blindly.
+The operator is looking at the same images you are. Prefer their input over
+your own earlier reasoning, but never over what the current images plainly
+show. If their input contradicts the images, say so rather than following it
+blindly.
 ```
 
 모델 단독 실행(`--verify model`, `--interactive` 없음)에서는 이 블록이 **들어가지
@@ -562,7 +597,7 @@ Already tried without success:
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 132개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 138개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
@@ -604,9 +639,9 @@ Already tried without success:
 | `config.py` | `config.toml` 로딩 (tomllib / tomli / 내장 최소 파서) |
 | `llm.py` | Qwen client (표준 `urllib`), message/image helper |
 | `renderer.py` | `/health` + `/probe` client와 probe script |
-| `prompts.py` | stage prompt 5종(bootstrap / plan / action-patch / action-rewrite / verify)과 운영자 메모·계약·영역·history·실패목록 블록 |
-| `pipeline.py` | bootstrap, PLAN/ACTION/APPLY/RENDER/VERIFY loop, 사람 개입 지점, 라운드 간 history·실패목록 |
-| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출, patch edit 적용, 비교 이미지 합성, 영역 crop |
+| `prompts.py` | stage prompt 10종 — bootstrap 4종(skeleton / check / fix / fill), single-shot 1종, plan, action 3종(patch / section / rewrite), verify — 과 운영자 메모·계약·영역·history·실패목록 블록 |
+| `pipeline.py` | 3단계 bootstrap, PLAN/ACTION/APPLY/RENDER/VERIFY loop, 사람 개입 지점, 라운드 간 history·실패목록 |
+| `utils.py` | 로깅, 이미지 인코딩, fence/think 제거, JSON 추출, patch edit 적용, section 구간 치환, 블록 마커 탐색, 변경 줄 수 계산, 비교 이미지 합성, 영역 crop |
 
 ## Renderer 계약
 
@@ -637,12 +672,19 @@ Chromium 버전과 설치된 폰트를 확인할 수 있다. 본문 텍스트에
 
 thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한다.
 
-| stage | thinking |
-| --- | --- |
-| BOOTSTRAP | off |
-| PLAN | on |
-| ACTION (patch·rewrite 모두) | off |
-| VERIFY | on |
+| stage | thinking | 왜 |
+| --- | --- | --- |
+| SKELETON (1단계) | off | 구조를 만드는 생성 작업 |
+| CHECK (2단계) | **on** | "같은 페이지로 보이나"는 판단이다 |
+| FIX (2단계) | off | 지적받은 대로 고치는 생성 작업 |
+| FILL (3단계) | off | 블록을 채우는 생성 작업 |
+| BOOTSTRAP (`--bootstrap single`) | off | 생성 |
+| PLAN | **on** | 무엇이 왜 다른지 고르는 판단 |
+| ACTION (patch·section·rewrite 모두) | off | 계획을 HTML로 옮기는 생성 |
+| VERIFY | **on** | keep/revert/done 판단 |
+
+판단하는 단계만 thinking을 켠다. 생성 단계에서 켜면 출력 예산을 reasoning이
+먹어서 HTML이 잘린다.
 
 서버가 이 key 때문에 HTTP 400을 반환하면 client가 key를 제거하고 한 번
 재시도하며, 경고를 명확히 로그에 남긴 뒤 이후로는 서버 기본값을 따른다. 이
@@ -661,8 +703,8 @@ thinking은 stage별로 `chat_template_kwargs.enable_thinking`으로 지정한�
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 132개가
-20개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 138개가
+21개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -702,6 +744,10 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   찾는지, 중복 id·마커 유실·같은 태그 중첩을 거부하는지, 블록 하나가 실패해도
   나머지가 채워지는지, 레이아웃 불일치가 글자를 채우기 전에 고쳐지는지,
   `--bootstrap single` 이 예전 1회 호출로 되돌아가는지
+* 문서와 코드의 일치 — README가 인용한 운영자 계약 블록이 실제 프롬프트와 같은지,
+  scope→모드 표의 각 줄이 라우터와 맞는지, `[bootstrap]` 기본값 표가 코드의
+  기본값과 같은지, README가 쓰라고 한 CLI 플래그가 실제로 있는지, thinking on/off
+  표가 실제 호출과 맞는지, 그리고 README에 적힌 검사 수가 실제로 돈 수와 같은지
 * bootstrap과 루프의 경계 — 시작 HTML을 고정하면 `staged` 든 `single` 이든 라운드별
   결정·모드·변경 줄 수가 같고 `clone.html` 이 바이트 단위로 같은지, 루프의 네 단계가
   bootstrap 설정을 아예 읽지 않는지

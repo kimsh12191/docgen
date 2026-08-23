@@ -11,6 +11,16 @@ python run.py build sample.png --ui
 
 구조와 확장 방법은 [ARCHITECTURE.md](ARCHITECTURE.md).
 
+### 처음 몇 분은 화면이 비어 있다
+
+주소를 열어도 바로 물어보지 않는다. 첫 HTML을 만드는 **bootstrap 3단계**
+(구조 → 육안 대조 → 블록별 채우기) 에는 **개입 지점이 없다.** 그 단계가 끝나고
+첫 라운드의 PLAN이 나올 때 첫 질문이 뜬다.
+
+bootstrap은 LLM 호출을 `1 + 1~2 + 블록 수` 만큼 한다 — 블록 6개면 8~9회다.
+그동안 뭘 하고 있는지는 터미널 로그(`BOOTSTRAP 1/3`, `2/3`, `3/3`)와
+`out/<이름>/rounds/bootstrap_skeleton.png` 로 확인한다.
+
 ---
 
 ## 전부 이 여섯 개다
@@ -243,7 +253,8 @@ python run.py build sample.png --ui \
 | --- | --- |
 | `rounds/rNN/plan.json` | `planned_by`, `operator_note`, `operator_instruction`, `operator_region`, `model_plan` |
 | `rounds/rNN/verify.json` | `verified_by`, `model_decision`, `operator_override`, `operator_note` |
-| `summary.json` | `verify_mode`, `verify_mode_final`, `operator_interventions`, `operator_rounds`, `skipped`, `failed_attempts`, 라운드별 `operator` |
+| `summary.json` | `verify_mode`, `verify_mode_final`, `operator_interventions`, `operator_rounds`, `skipped`, `failed_attempts`, `kept_line_changes`, 라운드별 `operator` · `mode` · `changed_lines` |
+| `rounds/bootstrap_stages.json` | bootstrap 3단계 결과 (개입 없음, 참고용) |
 
 모델 단독 성능을 보려면 `--ui` 없이 돌린 실행을 보고, 개입이 섞인 실행에서는
 `operator: true` 라운드를 빼고 읽는다.
@@ -256,6 +267,10 @@ python run.py build sample.png --ui \
 | `compare.png` | 항상 (원본 · 수정 전 · 수정 후) |
 | `compare_region.png` | 영역을 지정한 라운드만 |
 
+bootstrap 산출물은 라운드 폴더가 아니라 `rounds/` 바로 아래에 있다 —
+`bootstrap_skeleton.png`(구조만), `bootstrap_fill_01.png`~(블록을 채울 때마다),
+`bootstrap.png`(첫 초안 완성). **첫 질문이 이상하게 느껴지면 여기를 먼저 본다.**
+
 세 상태는 코드에서 한 함수(`judged_by`)로만 읽는다. 여섯 가지를 전부 열거해 태그 ·
 플래그 · 실려 가는 근거가 서로 맞는지 확인하는 테스트가 있다
 ([ARCHITECTURE.md](ARCHITECTURE.md#세-가지-상태는-한-곳에만-있다)).
@@ -264,6 +279,10 @@ python run.py build sample.png --ui \
 
 # 알아둘 제약
 
+* **bootstrap에는 개입할 수 없다.** 사람이 끼어드는 곳은 라운드의 PLAN과 VERIFY
+  두 곳뿐이다. 첫 초안이 마음에 안 들면 뜨는 첫 PLAN에서 ③으로 직접 지시한다.
+  초안 만드는 방식 자체를 바꾸려면 실행을 멈추고 `--bootstrap single` 이나
+  `config.toml` 의 `[bootstrap]` 값을 조정해야 한다.
 * **영역 지정은 요청이지 강제가 아니다.** APPLY가 patch가 그 영역 안을 건드렸는지
   검증하지 않는다. Qwen이 영역 밖을 고쳐도 통과한다.
 * **영역 좌표는 "같은 상대 위치"지 "같은 내용"이 아니다.** 렌더의 전체 높이가 원본과

@@ -28,9 +28,17 @@ UI를 빼면 같은 코드가 터미널로 돌아간다. 루프의 제어 흐름
 
 ## 한 라운드의 시간축
 
+`ReviewServer` 는 실행 시작과 함께 뜨지만, 첫 질문은 bootstrap 3단계가 끝난 뒤에야
+게시된다. 그 단계에는 `ask()` 호출이 없다 — 브라우저는 `/state` 를 폴링하면서
+`pending: null` 만 받는다.
+
 ```
 파이프라인 스레드                        브라우저
 ─────────────────                      ─────────
+BOOTSTRAP 1/3 skeleton   (질문 없음)
+BOOTSTRAP 2/3 check      (질문 없음)     GET /state -> pending: null
+BOOTSTRAP 3/3 fill × N   (질문 없음)     화면: 대기
+─────────────────
 PLAN 모델 호출
 review_plan()
   └ ask() ──── _pending 게시 ──────────▶
@@ -214,7 +222,7 @@ path, panels = side_by_side([("1. SOURCE", src), ("2. CURRENT RENDER", png)], ou
 | `pipeline.py` | `review_plan` / `review_verify` 가 `choices` 를 선언하고 답을 해석 |
 | `utils.py` | `side_by_side` (패널 박스 포함), `crop_normalized` |
 | `run.py` | `--ui`, `--ui-host`, `--ui-public-host`, `--ui-port`, `--ui-timeout` |
-| `prompts.py` | 사람 개입이 있는 실행에 붙는 계약 블록, 영역 설명 블록, history·실패목록 블록 |
+| `prompts.py` | 사람 개입이 있는 실행에 붙는 계약 블록, 영역 설명 블록, history·실패목록 블록. bootstrap 4단계 프롬프트는 개입 지점이 없어서 계약 블록이 붙지 않는다 |
 
 ---
 
@@ -259,7 +267,7 @@ UI 관련해 덮는 것:
 * 실행 중 설정 전환이 파이프라인에 즉시 반영되는지, 잘못된 값을 무시하는지
 * 영역 지정이 ACTION의 확대 crop 2장과 `compare_region.png` 로 이어지는지
 
-전체는 132개 검사이고 UI·영역 관련이 그 중 두 그룹이다.
+전체는 138개 검사이고 UI·영역 관련이 그 중 두 그룹이다.
 
 브라우저 자체 동작(버튼 클릭, 드래그)은 자동 테스트에 없다. Playwright로 직접
 띄워 확인했고, 그 과정에서 실제 버그 두 개가 나왔다 — 인라인 `onclick` 의

@@ -1769,6 +1769,71 @@ def test_bootstrap_does_not_touch_the_loop(llm_base: str, renderer_url: str) -> 
     ok("PLAN / ACTION / APPLY / VERIFY never read the bootstrap settings")
 
 
+# --------------------------- 21. the docs say what the code actually does
+
+def test_docs_match_the_code() -> None:
+    """Every doc claim here is one that has silently gone stale before."""
+    print("\n[21] 문서가 코드와 일치한다")
+    import prompts
+    from config import BootstrapConfig
+    from pipeline import HTML_WARN_SIZE, Pipeline
+
+    readme = (ROOT / "README.md").read_text()
+    flat = lambda text: " ".join(text.split())
+
+    # 1. The contract quoted in the README is the one the model is actually
+    #    sent. This block has been edited in prompts.py without the doc before.
+    assert flat(prompts.OPERATOR_CONTRACT) in flat(readme), \
+        "README의 계약 블록이 prompts.OPERATOR_CONTRACT 와 다르다"
+    ok("the operator contract quoted in README is the real prompt text")
+
+    # 2. The scope -> mode table. Each row is checked against the router, not
+    #    against another piece of prose.
+    rows = [
+        ("local", 1000, "patch"),
+        ("section", 1000, "section"),
+        ("global", 1000, "rewrite"),
+        ("global", HTML_WARN_SIZE + 1, "section"),
+    ]
+    for scope, size, mode in rows:
+        assert Pipeline.action_mode({"scope": scope}, size) == mode
+        assert f"`{scope}`" in readme, f"README에 scope {scope} 설명이 없다"
+        assert f"| {mode} |" in readme or f"| `{mode}`" in readme, mode
+    assert str(HTML_WARN_SIZE) in readme, "README의 크기 임계값이 코드와 다르다"
+    ok(f"the scope->mode table matches the router, {HTML_WARN_SIZE} included")
+
+    # 3. The [bootstrap] defaults table.
+    defaults = BootstrapConfig()
+    assert f"`{defaults.rough_max_side}`" in readme, defaults.rough_max_side
+    assert f"`{defaults.max_blocks}`" in readme, defaults.max_blocks
+    assert f"({defaults.rough_max_side}px)" in readme or \
+        f"{defaults.rough_max_side}px" in readme, "README가 축소 크기를 안 적었다"
+    ok(f"the [bootstrap] defaults in README are {defaults}")
+
+    # 4. Flags the README tells people to type have to exist.
+    import run as run_mod
+
+    parser = run_mod.build_parser() if hasattr(run_mod, "build_parser") else None
+    for flag in ("--bootstrap", "--ui-public-host", "--max-rounds", "--note"):
+        assert flag in readme, f"README에 {flag} 설명이 없다"
+        assert flag in (ROOT / "run.py").read_text(), f"run.py 에 {flag} 가 없다"
+    assert parser is None or parser  # build_parser is optional
+    ok("every CLI flag the README names exists in run.py")
+
+    # 5. thinking on/off per stage, as the README's table claims.
+    thinking = {"SKELETON": False, "CHECK": True, "FILL": False,
+                "PLAN": True, "VERIFY": True}
+    source = (ROOT / "pipeline.py").read_text()
+    for call, want in [('stage="skeleton"', False), ('stage="skeleton_check"', True),
+                       ('stage="plan"', True), ('stage="verify"', True)]:
+        where = source.find(call)
+        assert where != -1, call
+        window = source[max(0, where - 200):where]
+        assert f"thinking={want}" in window, f"{call} 의 thinking 이 {want} 가 아니다"
+    assert all(k in readme for k in thinking), "README의 thinking 표에 빠진 단계가 있다"
+    ok("thinking is on for the judging stages and off for the generating ones")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1794,6 +1859,15 @@ def main() -> int:
     test_section_mode(llm_base, renderer_url)
     test_staged_bootstrap(llm_base, renderer_url)
     test_bootstrap_does_not_touch_the_loop(llm_base, renderer_url)
+    test_docs_match_the_code()
+    # The README states this number. Counting this check itself keeps the two
+    # from drifting: change the suite, the number in the doc has to follow.
+    total = len(PASS) + 1
+    readme = (ROOT / "README.md").read_text()
+    assert f"{total}개 검사" in readme, (
+        f"README says something other than {total}개 검사 - 문서의 검사 수를 고쳐라"
+    )
+    ok(f"README states {total} checks, which is what ran")
     print(f"\n{len(PASS)} checks passed.")
     return 0
 
