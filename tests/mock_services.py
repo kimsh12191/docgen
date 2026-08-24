@@ -244,6 +244,15 @@ class LLMHandler(BaseHTTPRequestHandler):
     skeleton_mismatch = False
     skeleton_checks = 0
     fill_calls = 0
+    #: Stage prefix whose FIRST call burns the whole budget on reasoning and
+    #: answers nothing, as a real skeleton_fix was observed doing.
+    thinking_runaway = None
+    #: When set, the runaway fires even with thinking off, so the recovery
+    #: attempt fails too and the failure path itself can be exercised.
+    thinking_runaway_persist = False
+    runaway_hits = 0
+    #: Whether each recorded call had thinking enabled, keyed by stage.
+    thinking_seen = {}
     #: Longest image side each stage was sent, so a test can prove the
     #: structure-only steps really do look at a shrunk page.
     image_sides = {}
@@ -294,8 +303,39 @@ class LLMHandler(BaseHTTPRequestHandler):
                         sides.append(max(Image.open(io.BytesIO(blob)).size))
 
         content, stage = self._respond(text, n_images)
+        thinking = bool(
+            (req.get("chat_template_kwargs") or {}).get("enable_thinking", False)
+        )
         with LLMHandler.lock:
             LLMHandler.image_sides.setdefault(stage, []).append(max(sides) if sides else 0)
+            LLMHandler.thinking_seen.setdefault(stage, []).append(thinking)
+
+        # Reproduce the observed failure: all of max_tokens spent reasoning, the
+        # answer never started. Only while thinking is on, so a retry with it off
+        # is the thing that recovers.
+        runaway = LLMHandler.thinking_runaway
+        if runaway and stage.startswith(runaway) and (
+            thinking or LLMHandler.thinking_runaway_persist
+        ):
+            with LLMHandler.lock:
+                LLMHandler.runaway_hits += 1
+            self._send(
+                200,
+                {
+                    "id": "mock",
+                    "object": "chat.completion",
+                    "model": MODEL,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "",
+                                    "reasoning_content": "let me think about this at length. " * 40},
+                        "finish_reason": "length",
+                    }],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 32768},
+                    "_stage": stage,
+                },
+            )
+            return
         finish = "length" if (stage == "action" and LLMHandler.force_length_on_action) else "stop"
         self._send(
             200,

@@ -9,6 +9,9 @@ timeout = 900
 retries = 3
 image_max_side = 1600
 thinking = "all"
+thinking_brief = true
+log_calls = true
+log_chars = 2000
 
 [renderer]
 url = "http://10.167.129.230:30900"

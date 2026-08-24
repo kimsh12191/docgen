@@ -204,14 +204,40 @@ Page size: at this render width the page should be 800 x 1132 CSS pixels ...
 유지되고, 무엇보다 **두 이미지의 배율이 같은지가 그 줄에서 바로 보인다.**
 호출이 실패하면 프롬프트는 그대로 남고 `=== FAILED ===` 가 붙는다.
 
-터미널·`run.log` 에는 호출마다 한 줄씩 남는다.
+### 터미널에도 그대로 찍힌다
+
+파일만 남기면 안 보게 된다. 그래서 **프롬프트와 응답이 터미널·`run.log` 에도
+그대로 나온다.**
 
 ```
 TARGET: the page should render 800x1132 CSS px (source aspect 1:1.415)
-[plan] prompt: 2914 chars -> 006_plan.txt
-[plan] LLM call attempt 1/3 (thinking=True)
-[plan] ok: 139 chars, finish=stop, tokens=1841/46
+BOOTSTRAP 1/3: structure, from a 700px view of the page
+[skeleton] ---- prompt (1833 chars) -> 001_skeleton.txt ----
+--- system ---
+You lay out document pages as HTML skeletons, structure first.
+
+Think briefly. A few sentences of reasoning is enough. ...
+
+--- user (1 image(s)) ---
+The image is a document page, shown at low resolution on purpose.
+...
+Page size: at this render width the page should be 800 x 1132 CSS pixels ...
+[image 1: 700x990, 143 KB]
+[skeleton] LLM call attempt 1/3 (thinking=True)
+[skeleton] ok in 87s: 8221 chars (+3120 reasoning), finish=stop, tokens=702/8698
+[skeleton] ---- reasoning (3120 chars) ----
+...
+[skeleton] ---- response (8221 chars, finish=stop) ----
+<!doctype html> ...
 ```
+
+* 한 덩어리는 기본 **2000자**까지 찍고 가운데를 생략한다
+  (`... [1133 chars omitted] ...`). 앞은 무엇을 물었는지, 뒤는 어떻게 끝났는지가
+  남는다. 생략한 양을 같이 적으니 잘린 걸 완전한 것으로 착각하지 않는다.
+* `--log-chars 0` 이면 **전부** 찍는다. `--log-chars -1` 이면 터미널에는 안 찍고
+  `llm/` 파일에만 남긴다. `config.toml` 의 `log_calls` / `log_chars` 와 같다.
+* `ok in 87s` — **호출별 소요 시간**이 찍힌다. reasoning 길이도 응답 길이 옆에
+  같이 나오므로, 느린 호출이나 잘린 호출의 원인이 그 비율에서 보인다.
 
 ## 요구 사항
 
@@ -676,6 +702,8 @@ Already tried without success:
 | `rejected`가 대부분이고 `mode`가 `section` | 앵커 문제다. `error.json`에 `find_start`가 없었는지 여러 곳에 매칭됐는지, `find_end`가 뒤에 안 나왔는지가 그대로 찍힌다. 모델이 앵커를 그대로 베끼지 못하고 있다는 뜻이므로 `patch.json`의 `find_start`를 실제 HTML과 대조해 본다. |
 | `rejected`가 대부분이고 `mode`가 `patch` | `find` 문자열이 문서에 없거나 여러 곳에 매칭된다. `error.json`에 어느 문자열이 문제였는지 그대로 찍힌다. patch 프롬프트에서 "유일하게 매칭되는 짧은 문자열" 지시를 강화할 지점이다. |
 | `stop_reason`이 계속 `max_rounds` | 수렴이 느리다. `--max-rounds`를 늘리기 전에 `verify.json`의 `next_major_issue`를 보고 PLAN이 같은 문제를 반복해서 집는지 확인한다. 이 값은 다음 라운드 PLAN에 전달되므로, 계속 같은 값이면 PLAN이 그걸 못 고치고 있다는 뜻이다. |
+| 한 호출이 몇 분씩 걸리고 결국 아무것도 안 나온다 | thinking이 예산을 다 쓴 것이다. 로그의 `no content after NNNs` 와 `reasoning NNNNN chars` 로 확인된다. 코드가 그 호출만 thinking을 끄고 자동 재시도하므로 보통 다음 시도에서 살아난다. 계속 반복되면 `--thinking judging` 으로 생성 단계의 thinking을 끈다. 버려진 reasoning은 `llm/NNN_*.txt` 의 `reasoning of the failed call` 에 남아 있다. |
+| 터미널이 프롬프트·응답으로 도배된다 | `--log-chars` 로 조절한다. 기본 2000자, `0` 은 전부, `-1` 은 터미널에 안 찍고 `llm/` 파일에만 남긴다. |
 | `thinking_control`이 `false` | 서버가 해당 파라미터를 안 받는다. 동작은 하지만 PLAN·VERIFY가 thinking 없이 판단하므로 품질이 떨어질 수 있다. |
 | `errors`가 있다 | LLM 호출 실패다. `run.log`에 재시도 내역과 HTTP 응답이 남는다. |
 | `kept`만 쌓이는데 `compare.png`는 나아지지 않는다 | VERIFY가 자기 수정에 관대한 경우다. `--ui` 로 Qwen 판정을 보면서 사람이 갈아치운다. |
@@ -692,7 +720,7 @@ Already tried without success:
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 151개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 161개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
@@ -725,8 +753,14 @@ Already tried without success:
 | `rough_max_side` | `700` | 구조 단계에서 원본을 이 크기로 줄인다. 글자가 읽히면 안 되므로 너무 크게 잡지 않는다 |
 | `max_blocks` | `12` | 채우기 단계의 상한. 골격이 이보다 많이 표시하면 앞에서부터 이 개수만 채우고 경고를 남긴다 |
 
-`[llm]` 의 `thinking` 은 `all`(기본) 또는 `judging` 이다. `--thinking` 이나
-`DOCGEN_LLM_THINKING` 으로도 덮어쓸 수 있다. 자세한 건 위의 "Thinking 제어".
+`[llm]` 의 thinking·로그 관련 키.
+
+| 키 | 기본값 | 의미 |
+| --- | --- | --- |
+| `thinking` | `"all"` | `all` = 전 단계, `judging` = 판단 단계만. `--thinking`, `DOCGEN_LLM_THINKING` |
+| `thinking_brief` | `true` | thinking이 켜진 호출에 "짧게 생각하라"를 붙인다 |
+| `log_calls` | `true` | 프롬프트·응답을 터미널·`run.log` 에도 찍는다 |
+| `log_chars` | `2000` | 그때 한 덩어리 최대 길이. `0` 이면 전부. `--log-chars` |
 
 ## 파일 구성
 
@@ -795,6 +829,48 @@ candidate rejected: ACTION hit max_tokens (32768); the rewrite is truncated
  thinking="judging" gives generating stages the whole of it)
 ```
 
+### thinking이 예산을 다 써버릴 때
+
+실제로 겪은 일이다. `skeleton_fix` 가 **32768 토큰을 전부 reasoning에 쓰고 답을
+0자로** 돌려줬다 — 5분 37초를 쓰고 아무것도 못 받았다.
+
+```
+[skeleton_fix] no content after 337s: empty content after stripping <think>
+               (finish_reason='length', raw 0 chars, reasoning 31904 chars)
+[skeleton_fix] the whole 32768-token budget went to reasoning and no answer was
+               produced. Retrying this call with thinking off.
+[skeleton_fix] LLM call attempt 2/3 (thinking=False)
+[skeleton_fix] ok in 22s: 7940 chars, finish=stop
+```
+
+두 가지로 대응한다.
+
+1. **짧게 생각하라고 지시한다** (`llm.thinking_brief`, 기본 `true`). 서버 쪽에
+   reasoning 토큰 예산 같은 건 없으니 프롬프트 지시다. thinking이 켜진 호출의
+   system 메시지에 붙는다.
+
+   ```
+   Think briefly. A few sentences of reasoning is enough. Do not describe the
+   images back to yourself, do not enumerate every difference you can see, and
+   do not draft the answer inside your reasoning. Reach the decision, then give
+   the answer in the required format.
+   ```
+
+2. **그래도 예산을 다 쓰면 그 호출만 thinking을 끄고 재시도한다.** 원인이
+   thinking이니 같은 조건으로 다시 몇 분을 쓰는 건 의미가 없다. 이 재시도는
+   `retries` 예산을 **먹지 않는** 추가 시도이고, **다음 호출은 설정대로 다시
+   생각한다** — 영구 스위치가 아니다.
+
+재시도까지 실패하면 그 단계는 포기하고(골격 유지·블록은 그린 대로) 진행하되,
+**버려진 reasoning을 기록에 남긴다.** 그 몇 분간 뭘 했는지에 대한 유일한 기록이다.
+
+```
+=== FAILED ===
+[skeleton_fix] LLM call failed after 2 attempts: ... reasoning 31904 chars
+=== reasoning of the failed call (31904 chars) ===
+...
+```
+
 `max_tokens` 는 **모든 단계가 같은 값**(`llm.max_tokens`, 기본 32768)을 쓴다.
 단계별로 나눠 배정하지 않는다 — 예산이 아니라 **상한**이라서, PLAN처럼 JSON 몇
 줄만 내는 단계가 32768을 들고 있어도 낭비가 아니다. 실제로 걸리는 곳은 **전문을
@@ -826,8 +902,8 @@ thinking 결정은 `Pipeline.thinking_for()` 한 곳에서만 하고, 모든 모
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 151개가
-22개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 161개가
+23개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -872,6 +948,11 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   남기는지, `page_size_block` 이 목표와 (3% 넘는) 차이만 지적하는지, 모든 호출이
   기록되고 그 안에 프롬프트·이미지 크기·응답이 있고 base64는 없는지, 비교 단계
   (CHECK·PLAN·VERIFY)가 받은 이미지들의 폭이 전부 같은지
+* thinking 폭주 복구 — 답이 0자로 온 실패가 reasoning을 실어 나르는지, 그 호출만
+  thinking을 끄고 재시도해서 살아나는지(그 추가 시도가 retry 예산을 먹지 않고,
+  이후 호출은 다시 생각하는지), 재시도까지 실패하면 버려진 reasoning이 기록에
+  남고 빌드는 계속되는지, 프롬프트·응답이 터미널에 찍히고 `log_calls=false` 면
+  파일만 남는지
 * 문서와 코드의 일치 — README가 인용한 운영자 계약 블록이 실제 프롬프트와 같은지,
   scope→모드 표의 각 줄이 라우터와 맞는지, `[bootstrap]` 기본값 표가 코드의
   기본값과 같은지, README가 쓰라고 한 CLI 플래그가 실제로 있는지, thinking on/off

@@ -13,6 +13,7 @@ from llm import LLMError, QwenClient, image_part, system_message, user_message
 from renderer import RendererClient, RendererError
 from utils import (
     apply_edits,
+    clip,
     apply_section,
     block_markers,
     clean_fragment_output,
@@ -275,19 +276,34 @@ class Pipeline:
         if self.target_page:
             messages = self._with_page_size(messages)
         thinking = self.thinking_for(stage)
+        if thinking and self.cfg.llm.thinking_brief:
+            messages = self._with_brief_thinking(messages)
 
         self._calls += 1
         path = ensure_dir(self.out / "llm") / f"{self._calls:03d}_{stage.replace(':', '-')}.txt"
         prompt = transcribe_messages(messages)
         header = f"call {self._calls}  stage={stage}  thinking={thinking}"
         write_text(path, f"=== {header} ===\n\n{prompt}\n")
-        LOG.info("[%s] prompt: %d chars -> %s", stage, len(prompt), path.name)
+        self._log_block(stage, f"prompt ({len(prompt)} chars) -> {path.name}", prompt)
 
         try:
             resp = self.llm.chat(messages, thinking=thinking, stage=stage)
         except LLMError as exc:
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(f"\n=== FAILED ===\n{exc}\n")
+                # A call that spent its whole budget thinking produced no answer
+                # but plenty of reasoning, and that reasoning is the only record
+                # of what it was doing for those minutes.
+                reasoning = getattr(exc, "reasoning", "")
+                if reasoning:
+                    fh.write(
+                        f"\n=== reasoning of the failed call ({len(reasoning)} chars) "
+                        f"===\n{reasoning}\n"
+                    )
+            if reasoning:
+                self._log_block(
+                    stage, f"reasoning of the FAILED call ({len(reasoning)} chars)", reasoning
+                )
             raise
 
         with open(path, "a", encoding="utf-8") as fh:
@@ -297,7 +313,40 @@ class Pipeline:
                 f"\n=== response  finish={resp.finish_reason}  "
                 f"{len(resp.content)} chars ===\n{resp.content}\n"
             )
+        if resp.reasoning:
+            self._log_block(stage, f"reasoning ({len(resp.reasoning)} chars)", resp.reasoning)
+        self._log_block(
+            stage,
+            f"response ({len(resp.content)} chars, finish={resp.finish_reason or '?'})",
+            resp.content,
+        )
         return resp
+
+    def _log_block(self, stage: str, title: str, body: str) -> None:
+        """One labelled block of a call, on the terminal and in run.log.
+
+        The transcripts under llm/ hold everything, but a file nobody opens is
+        not a log. What is actually read is this, so it goes to the same place
+        as the rest of the run's output, clipped to stay readable.
+        """
+        if not self.cfg.llm.log_calls:
+            return
+        LOG.info(
+            "[%s] ---- %s ----\n%s", stage, title, clip(body, self.cfg.llm.log_chars)
+        )
+
+    def _with_brief_thinking(self, messages: list) -> list:
+        """Ask for short reasoning, on the system message where it belongs."""
+        block = prompts.brief_thinking_block(True)
+        out = [dict(m) for m in messages]
+        for message in out:
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = f"{content}\n\n{block}"
+                return out
+        return [{"role": "system", "content": block}] + out
 
     def _with_page_size(self, messages: list) -> list:
         """Append the page-size fact to the last text part of the last user turn."""

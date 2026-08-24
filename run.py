@@ -170,6 +170,10 @@ def cmd_build(args, cfg) -> int:
         cfg.bootstrap.staged = args.bootstrap == "staged"
     if args.thinking:
         cfg.llm.thinking = args.thinking
+    if args.log_chars is not None:
+        # -1 is "do not print them at all"; 0 is "print all of it".
+        cfg.llm.log_calls = args.log_chars >= 0
+        cfg.llm.log_chars = max(0, args.log_chars)
 
     try:
         notes = _operator_notes(args)
@@ -301,6 +305,14 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("source", help="입력 문서 PNG")
     build.add_argument("-o", "--output", help="출력 디렉터리 (기본값 out/<이름>)")
     build.add_argument("--max-rounds", type=int, help="최대 라운드 수 (기본값은 config)")
+    build.add_argument(
+        "--log-chars",
+        type=int,
+        default=None,
+        help=("터미널에 찍는 프롬프트·응답 한 덩어리의 최대 길이 (기본 2000). "
+              "0 이면 전부 찍는다. -1 이면 프롬프트·응답을 아예 찍지 않고 "
+              "out/<이름>/llm/ 파일에만 남긴다"),
+    )
     build.add_argument(
         "--thinking",
         choices=THINKING_MODES,

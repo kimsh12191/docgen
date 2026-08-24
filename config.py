@@ -90,6 +90,16 @@ class LLMConfig:
     #: "all" thinks at every stage; "judging" only where a decision is made
     #: (PLAN, the layout check, VERIFY). See Pipeline.thinking_for.
     thinking: str = "all"
+    #: Ask for short reasoning wherever thinking is on. There is no server-side
+    #: token budget for it, so this is a prompt instruction -- the alternative
+    #: is a stage spending the whole max_tokens reasoning and answering nothing.
+    thinking_brief: bool = True
+    #: Print each call's prompt and reply to the terminal (and run.log). A file
+    #: nobody opens is not a log; this is the one that gets read.
+    log_calls: bool = True
+    #: Per-block cap for that printing. 0 prints everything, which for a
+    #: rewrite means the whole document twice.
+    log_chars: int = 2000
 
 
 @dataclass

@@ -1956,6 +1956,184 @@ def test_scale_and_call_log(llm_base: str, renderer_url: str) -> None:
     ok("the page-size fact is in the prompt, not left to be inferred")
 
 
+# ------------- 23. a stage that spends its whole budget thinking still lands
+
+def test_thinking_runaway_recovers(llm_base: str, renderer_url: str) -> None:
+    """Observed for real: skeleton_fix reasoned for 5m37s and answered nothing."""
+    print("\n[23] thinking이 예산을 다 써도 라운드가 살아난다")
+    import shutil
+
+    import prompts
+    from llm import LLMEmptyContent, QwenClient
+    from pipeline import Pipeline
+
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+    assert cfg.llm.thinking_brief, "brief reasoning is meant to be the default"
+
+    # 1. The empty answer carries the reasoning out. Losing it means losing the
+    #    only record of what the call was doing for those minutes.
+    client = QwenClient(cfg.llm)
+    burnt = {
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "",
+                        "reasoning_content": "thinking " * 200},
+            "finish_reason": "length",
+        }],
+    }
+    carried = ""
+    try:
+        client._parse(burnt, "skeleton_fix")
+    except LLMEmptyContent as exc:
+        # `exc` is unbound after the block, so keep what the test needs.
+        carried = exc.reasoning
+        assert exc.finish_reason == "length", exc.finish_reason
+        assert f"reasoning {len(carried)} chars" in str(exc), str(exc)
+    else:
+        raise AssertionError("an answer of nothing should raise")
+    assert len(carried) > 100, len(carried)
+    ok(f"the failure carries its {len(carried)}-char reasoning and names the length")
+
+    # The mock's stage comes from the prompt text; an unmatched prompt is
+    # "other", which has no image assertions to satisfy here.
+    mock_services.LLMHandler.thinking_runaway = "other"
+    mock_services.LLMHandler.runaway_hits = 0
+    mock_services.LLMHandler.thinking_seen = {}
+    try:
+
+        # 2. With a retry available it recovers by dropping thinking for that
+        #    one call, and the extra attempt does not eat the retry budget.
+        mock_services.LLMHandler.runaway_hits = 0
+        mock_services.LLMHandler.thinking_seen = {}
+        client2 = QwenClient(cfg.llm)
+        client2.cfg.retries = 1
+        resp = client2.chat([{"role": "user", "content": "hello"}], thinking=True, stage="other")
+        assert resp.content.strip(), "the retry produced nothing"
+        seen = mock_services.LLMHandler.thinking_seen.get("other", [])
+        assert seen == [True, False], f"thinking sequence was {seen}"
+        assert mock_services.LLMHandler.runaway_hits == 1, mock_services.LLMHandler.runaway_hits
+        ok("one retry with thinking off recovers the call, on an extra attempt")
+
+        # 3. And the next call thinks again -- it is not a permanent switch.
+        assert client2.supports_thinking_flag, "thinking was switched off for good"
+        ok("thinking is not disabled for the rest of the run")
+    finally:
+        mock_services.LLMHandler.thinking_runaway = None
+
+    # 4. In a real build, the step that used to be lost now lands.
+    def build_with_runaway(name: str, persist: bool) -> tuple[list, Path]:
+        out = ROOT / "out" / name
+        if out.exists():
+            shutil.rmtree(out)
+        mock_services.LLMHandler.plan_calls = 0
+        mock_services.LLMHandler.skeleton_checks = 0
+        mock_services.LLMHandler.runaway_hits = 0
+        mock_services.LLMHandler.thinking_runaway = "skeleton_fix"
+        mock_services.LLMHandler.thinking_runaway_persist = persist
+        mock_services.LLMHandler.skeleton_mismatch = True
+        try:
+            Pipeline(cfg, out).build(make_source_png(Path("tmp/source_fixture.png")))
+        finally:
+            mock_services.LLMHandler.thinking_runaway = None
+            mock_services.LLMHandler.thinking_runaway_persist = False
+            mock_services.LLMHandler.skeleton_mismatch = False
+        stages = json.loads((out / "rounds" / "bootstrap_stages.json").read_text())["stages"]
+        return stages, out
+
+    stages, out = build_with_runaway("runaway_recovered", persist=False)
+    fix = [st for st in stages if st["step"] == "layout_fix"]
+    assert fix and fix[0]["landed"], stages
+    assert mock_services.LLMHandler.runaway_hits == 1
+    assert (out / "rounds" / "bootstrap_rough.html").exists()
+    ok("the layout fix that burned its budget thinking lands on the retry")
+
+    # 5. And when the retry burns too, the failure is written down in full.
+    stages, out = build_with_runaway("runaway_lost", persist=True)
+    fix = [st for st in stages if st["step"] == "layout_fix"]
+    assert fix and not fix[0]["landed"], stages
+    ok("a fix that fails twice is recorded as not landed, the skeleton is kept")
+
+    log = next((out / "llm").glob("*skeleton_fix*"), None)
+    assert log is not None, "the failed call left no transcript"
+    body = log.read_text()
+    assert "=== FAILED ===" in body, body[-400:]
+    assert "reasoning of the failed call" in body, body[-400:]
+    assert "let me think about this at length" in body, "the reasoning was thrown away"
+    ok(f"{log.name} keeps the prompt and the reasoning of the call that answered nothing")
+
+    # The run carried on regardless: the fill phase and the loop still ran.
+    assert [st["step"] for st in stages].count("fill") == 3, stages
+    ok("the build carried on to the fill phase after the lost fix")
+
+    # 6. The prompt and the reply reach the terminal, not just a file.
+    import io
+    import logging
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    out = ROOT / "out" / "log_to_terminal"
+    if out.exists():
+        shutil.rmtree(out)
+    try:
+        cfg.llm.log_chars = 400
+        mock_services.LLMHandler.plan_calls = 0
+        mock_services.LLMHandler.skeleton_checks = 0
+        Pipeline(cfg, out).build(make_source_png(Path("tmp/source_fixture.png")))
+    finally:
+        root.removeHandler(handler)
+        cfg.llm.log_chars = 2000
+    printed = stream.getvalue()
+
+    assert "---- prompt (" in printed, "the prompt never reached the log"
+    assert "---- response (" in printed, "the reply never reached the log"
+    assert "You lay out document pages as HTML skeletons" in printed, \
+        "the prompt text itself is not in the log"
+    # The page-size block sits at the end of the prompt, so at 400 chars it is
+    # inside the omitted middle. Group 22 asserts it against the full transcript.
+    assert "chars omitted" in printed, "nothing was clipped at 400 chars"
+    assert "data:image/png;base64" not in printed, "base64 was printed to the terminal"
+    assert "[image 1:" in printed, "image sizes are not visible in the log"
+    ok(f"prompt and reply are printed to the terminal ({len(printed)} chars logged)")
+
+    # Off means off -- the files are still written.
+    stream2 = io.StringIO()
+    handler2 = logging.StreamHandler(stream2)
+    root.addHandler(handler2)
+    out2 = ROOT / "out" / "log_quiet"
+    if out2.exists():
+        shutil.rmtree(out2)
+    try:
+        cfg.llm.log_calls = False
+        mock_services.LLMHandler.plan_calls = 0
+        mock_services.LLMHandler.skeleton_checks = 0
+        Pipeline(cfg, out2).build(make_source_png(Path("tmp/source_fixture.png")))
+    finally:
+        root.removeHandler(handler2)
+        cfg.llm.log_calls = True
+    quiet = stream2.getvalue()
+    assert "---- prompt (" not in quiet, "log_calls=False still printed the prompt"
+    assert list((out2 / "llm").glob("*.txt")), "the transcripts stopped being written too"
+    ok("log_calls=false silences the terminal but keeps the transcripts")
+
+    # 7. The brevity instruction is on the system message, only when thinking.
+    pipe = Pipeline(cfg, ROOT / "out" / "brief_probe")
+    msgs = [{"role": "system", "content": "You judge."}, {"role": "user", "content": "go"}]
+    with_brief = pipe._with_brief_thinking(msgs)
+    assert prompts.THINK_BRIEF in with_brief[0]["content"], with_brief[0]
+    assert msgs[0]["content"] == "You judge.", "the caller's messages were mutated"
+    assert "Think briefly" in prompts.THINK_BRIEF
+    assert not prompts.brief_thinking_block(False)
+    ok("brief reasoning is asked for on the system message, without mutating the input")
+
+
 def main() -> int:
     utils.setup_logging(verbose=False)
     (ROOT / "tests" / "fast.toml").write_text(
@@ -1982,6 +2160,7 @@ def main() -> int:
     test_staged_bootstrap(llm_base, renderer_url)
     test_bootstrap_does_not_touch_the_loop(llm_base, renderer_url)
     test_scale_and_call_log(llm_base, renderer_url)
+    test_thinking_runaway_recovers(llm_base, renderer_url)
     test_docs_match_the_code()
     # The README states this number. Counting this check itself keeps the two
     # from drifting: change the suite, the number in the doc has to follow.

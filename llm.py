@@ -19,6 +19,20 @@ class LLMError(RuntimeError):
     """Raised when the LLM endpoint cannot be used or returns no usable content."""
 
 
+class LLMEmptyContent(LLMError):
+    """The model answered with no content -- usually all budget went to thinking.
+
+    Carries the reasoning it did produce. When a call spends 32768 tokens
+    thinking and returns nothing, that reasoning is the only record of what
+    happened, and throwing it away leaves nothing to read.
+    """
+
+    def __init__(self, message: str, reasoning: str = "", finish_reason: str = "") -> None:
+        super().__init__(message)
+        self.reasoning = reasoning
+        self.finish_reason = finish_reason
+
+
 # --------------------------------------------------------------- message parts
 
 def text_part(text: str) -> dict:
@@ -129,20 +143,49 @@ class QwenClient:
         last_error: Exception | None = None
         attempts = max(1, self.cfg.retries)
         attempt = 0
+        thinking_now = bool(thinking)
 
         while attempt < attempts:
             attempt += 1
+            started = time.monotonic()
             try:
                 LOG.info(
                     "[%s] LLM call attempt %d/%d (thinking=%s%s)",
                     stage,
                     attempt,
                     attempts,
-                    thinking,
+                    thinking_now,
                     "" if self.supports_thinking_flag else ", server default",
                 )
                 data = self._post("/chat/completions", payload)
-                return self._parse(data, stage)
+                return self._parse(data, stage, elapsed=time.monotonic() - started)
+
+            except LLMEmptyContent as exc:
+                last_error = exc
+                LOG.warning(
+                    "[%s] no content after %.0fs: %s", stage, time.monotonic() - started, exc
+                )
+                # All of max_tokens went into reasoning and the answer never
+                # started. Thinking is the cause, so retry this one call without
+                # it rather than spending the same minutes again. Not a permanent
+                # switch: the next call thinks as configured.
+                if (
+                    exc.finish_reason == "length"
+                    and thinking_now
+                    and self.supports_thinking_flag
+                ):
+                    LOG.warning(
+                        "[%s] the whole %s-token budget went to reasoning and no answer "
+                        "was produced. Retrying this call with thinking off.",
+                        stage,
+                        self.cfg.max_tokens,
+                    )
+                    payload["chat_template_kwargs"] = {"enable_thinking": False}
+                    thinking_now = False
+                    # An extra attempt: this must not eat the budget reserved for
+                    # genuine transient failures.
+                    attempts += 1
+                    continue
 
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:500]
@@ -179,9 +222,18 @@ class QwenClient:
                 LOG.warning("[%s] attempt %d failed (%s); retrying in %.0fs", stage, attempt, last_error, backoff)
                 time.sleep(backoff)
 
-        raise LLMError(f"[{stage}] LLM call failed after {attempts} attempts: {last_error}")
+        summary = f"[{stage}] LLM call failed after {attempts} attempts: {last_error}"
+        # Carry the reasoning through the wrapper. Losing it here is how a call
+        # that thought for five minutes ends up leaving no trace of what it did.
+        if isinstance(last_error, LLMEmptyContent):
+            raise LLMEmptyContent(
+                summary,
+                reasoning=last_error.reasoning,
+                finish_reason=last_error.finish_reason,
+            )
+        raise LLMError(summary)
 
-    def _parse(self, data: dict, stage: str) -> LLMResponse:
+    def _parse(self, data: dict, stage: str, elapsed: float = 0.0) -> LLMResponse:
         choices = data.get("choices") or []
         if not choices:
             raise LLMError(f"[{stage}] response contained no choices: {str(data)[:300]}")
@@ -202,16 +254,23 @@ class QwenClient:
 
         content = strip_think(raw_content)
         if not content.strip():
-            raise LLMError(
+            raise LLMEmptyContent(
                 f"[{stage}] empty content after stripping <think> "
-                f"(finish_reason={finish_reason!r}, raw {len(raw_content)} chars)"
+                f"(finish_reason={finish_reason!r}, raw {len(raw_content)} chars, "
+                f"reasoning {len(reasoning)} chars)",
+                reasoning=reasoning,
+                finish_reason=finish_reason,
             )
 
         usage = data.get("usage") or {}
+        # Reasoning length is reported next to the answer length: when thinking
+        # is on, that ratio is what explains a slow call or a truncated one.
         LOG.info(
-            "[%s] ok: %d chars, finish=%s, tokens=%s/%s",
+            "[%s] ok in %.0fs: %d chars%s, finish=%s, tokens=%s/%s",
             stage,
+            elapsed,
             len(content),
+            f" (+{len(reasoning)} reasoning)" if reasoning else "",
             finish_reason or "?",
             usage.get("prompt_tokens", "?"),
             usage.get("completion_tokens", "?"),

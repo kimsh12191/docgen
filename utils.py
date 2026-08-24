@@ -196,6 +196,22 @@ def resize_to_width(source: str | os.PathLike | bytes, width: int) -> bytes:
     return buf.getvalue()
 
 
+def clip(text: str, limit: int) -> str:
+    """Long text with the middle removed, keeping both ends.
+
+    For reading in a terminal. The head says what was asked and the tail says
+    how it finished; the omitted middle is usually a document body, and the
+    count says how much was left out so nothing looks complete when it is not.
+    """
+    text = text or ""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    tail = limit - head
+    cut = len(text) - head - tail
+    return f"{text[:head]}\n\n... [{cut} chars omitted] ...\n\n{text[-tail:]}"
+
+
 def transcribe_messages(messages: list) -> str:
     """Messages as readable text, images reduced to their dimensions.
 

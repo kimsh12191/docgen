@@ -316,6 +316,23 @@ The operator is looking at the same images you are. Prefer their input over your
 
 
 
+
+# Appended to the system message whenever a stage is thinking. Qwen will
+# otherwise reason until it runs out of budget on a dense page -- observed
+# spending a whole 32768-token budget on one skeleton_fix and returning no
+# answer at all.
+THINK_BRIEF = (
+    "Think briefly. A few sentences of reasoning is enough. Do not describe the "
+    "images back to yourself, do not enumerate every difference you can see, and "
+    "do not draft the answer inside your reasoning. Reach the decision, then give "
+    "the answer in the required format."
+)
+
+
+def brief_thinking_block(active: bool) -> str:
+    """Empty unless this call is thinking and brevity is wanted."""
+    return THINK_BRIEF if active else ""
+
 def page_size_block(target: tuple, rendered_height=None, tolerance: float = 0.03) -> str:
     """The page height the recreation is aiming for, and how far off it is.
 
