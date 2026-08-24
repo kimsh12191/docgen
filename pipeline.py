@@ -24,7 +24,10 @@ from utils import (
     html_sanity_check,
     crop_normalized,
     image_size,
+    resize_to_width,
     side_by_side,
+    target_page_size,
+    transcribe_messages,
     truncate,
     write_bytes,
     write_json,
@@ -201,18 +204,41 @@ class Pipeline:
         self.out = ensure_dir(out_dir)
         self.rounds_dir = ensure_dir(self.out / "rounds")
         self.max_side = cfg.llm.image_max_side
+        # The page size the recreation is aiming for, in CSS pixels, and the
+        # height the last render actually produced. Both are facts the model
+        # cannot work out from images that may be at different scales.
+        self.target_page: tuple[int, int] | None = None
+        self.render_height: float | None = None
+        self._calls = 0
 
     # ---------------------------------------------------------------- render
 
     def render(self, html: str) -> tuple[bytes, dict]:
-        return self.renderer.probe(
+        png, metrics = self.renderer.probe(
             html,
             width=self.cfg.renderer.width,
             wait_ms=self.cfg.renderer.wait_ms,
         )
+        # Every render passes through here, so this is where the current page
+        # height is learned. The next prompt states it against the target.
+        page = metrics.get("page") if isinstance(metrics, dict) else None
+        height = (page or {}).get("height") or (metrics or {}).get("scrollHeight")
+        self.render_height = float(height) if height else None
+        return png, metrics
 
     def _img(self, path_or_bytes):
         return image_part(path_or_bytes, max_side=self.max_side)
+
+    def _ref(self, path_or_bytes):
+        """The source at the render's own width, so proportions are comparable.
+
+        Sent wherever the question is geometric. A scan is several times wider
+        than the render in pixels; asking whether one is taller than the other
+        across that scale difference is asking the model to do arithmetic on
+        two images instead of looking at them.
+        """
+        width = int(self.cfg.renderer.width * max(self.cfg.renderer.device_scale, 1.0))
+        return image_part(resize_to_width(path_or_bytes, width), max_side=self.max_side)
 
     # ------------------------------------------------------------ llm calls
 
@@ -240,9 +266,62 @@ class Pipeline:
         )
 
     def _chat(self, messages, stage: str):
-        """Every model call goes through here, so no stage can disagree with
-        the configured thinking policy."""
-        return self.llm.chat(messages, thinking=self.thinking_for(stage), stage=stage)
+        """Every model call goes through here.
+
+        Which makes it the one place that can guarantee two things for every
+        stage: the configured thinking policy, and that the page-size fact is
+        present. A stage that silently lacked the second is the bug this fixes.
+        """
+        if self.target_page:
+            messages = self._with_page_size(messages)
+        thinking = self.thinking_for(stage)
+
+        self._calls += 1
+        path = ensure_dir(self.out / "llm") / f"{self._calls:03d}_{stage.replace(':', '-')}.txt"
+        prompt = transcribe_messages(messages)
+        header = f"call {self._calls}  stage={stage}  thinking={thinking}"
+        write_text(path, f"=== {header} ===\n\n{prompt}\n")
+        LOG.info("[%s] prompt: %d chars -> %s", stage, len(prompt), path.name)
+
+        try:
+            resp = self.llm.chat(messages, thinking=thinking, stage=stage)
+        except LLMError as exc:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n=== FAILED ===\n{exc}\n")
+            raise
+
+        with open(path, "a", encoding="utf-8") as fh:
+            if resp.reasoning:
+                fh.write(f"\n=== reasoning ({len(resp.reasoning)} chars) ===\n{resp.reasoning}\n")
+            fh.write(
+                f"\n=== response  finish={resp.finish_reason}  "
+                f"{len(resp.content)} chars ===\n{resp.content}\n"
+            )
+        return resp
+
+    def _with_page_size(self, messages: list) -> list:
+        """Append the page-size fact to the last text part of the last user turn."""
+        block = prompts.page_size_block(self.target_page, self.render_height)
+        out = [dict(m) for m in messages]
+        for message in reversed(out):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = f"{content}\n\n{block}"
+                return out
+            parts = list(content or [])
+            for index in range(len(parts) - 1, -1, -1):
+                part = parts[index]
+                if isinstance(part, dict) and part.get("type") == "text":
+                    part = dict(part)
+                    part["text"] = f"{part.get('text', '')}\n\n{block}"
+                    parts[index] = part
+                    message["content"] = parts
+                    return out
+            message["content"] = parts + [{"type": "text", "text": block}]
+            return out
+        return out
 
     # ------------------------------------------------------------- bootstrap
 
@@ -253,6 +332,16 @@ class Pipeline:
         and typographically right, and the loop afterwards fixes one thing a
         round, so a draft with the wrong layout is never caught up with.
         """
+        # Fixed for the whole run: the renderer always lays out at one width, so
+        # the source's aspect ratio is the height every stage is aiming for.
+        self.target_page = target_page_size(source_png, self.cfg.renderer.width)
+        LOG.info(
+            "TARGET: the page should render %dx%d CSS px (source aspect 1:%.3f)",
+            self.target_page[0],
+            self.target_page[1],
+            self.target_page[1] / self.target_page[0],
+        )
+
         if self.cfg.bootstrap.staged:
             html, png, metrics, stages = self._bootstrap_staged(source_png)
         else:
@@ -267,8 +356,16 @@ class Pipeline:
         return html, png
 
     def _rough(self, path_or_bytes):
-        """The page with the detail thrown away, for the structure-only steps."""
-        return image_part(path_or_bytes, max_side=self.cfg.bootstrap.rough_max_side)
+        """The page with the detail thrown away, for the structure-only steps.
+
+        Normalised by width, not by longest side. max_side caps the longest
+        side, so a 1:1.41 scan and a 1:1.75 render came out at different widths
+        and the layout comparison was made across a scale difference -- exactly
+        the question those steps exist to answer. The max_side here is only a
+        guard against a runaway-tall render.
+        """
+        rough = min(self.cfg.bootstrap.rough_max_side, self.cfg.renderer.width)
+        return image_part(resize_to_width(path_or_bytes, rough), max_side=4 * rough)
 
     def _stage_render(self, name: str, html: str) -> tuple[bytes, dict]:
         """Render one bootstrap stage, keeping both halves for inspection."""
@@ -513,7 +610,7 @@ class Pipeline:
             system_message(prompts.PLAN_SYSTEM),
             user_message(
                 text,
-                self._img(source_png),
+                self._ref(source_png),
                 self._img(current_png),
             ),
         ]
@@ -599,7 +696,7 @@ class Pipeline:
         if contract:
             text = f"{text}\n\n{contract}"
 
-        parts = [self._img(source_png), self._img(current_png)]
+        parts = [self._ref(source_png), self._img(current_png)]
         region = plan.get("operator_region")
         if isinstance(region, dict):
             # Zoomed crops of the marked area: the same normalised rect applies
@@ -660,7 +757,7 @@ class Pipeline:
             system_message(prompts.VERIFY_SYSTEM),
             user_message(
                 text,
-                self._img(source_png),
+                self._ref(source_png),
                 self._img(before_png),
                 self._img(candidate_png),
             ),

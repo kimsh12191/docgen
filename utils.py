@@ -151,6 +151,90 @@ def crop_normalized(source, rect: dict, margin: float = 0.03) -> bytes:
     return _to_png(img.crop((x0, y0, x1, y1)))
 
 
+def target_page_size(source: str | os.PathLike | bytes, width: int) -> tuple[int, int]:
+    """The page size the recreation should render at, in CSS pixels.
+
+    The renderer always lays out at a fixed width, so the source's aspect ratio
+    is what fixes the height. Without this the model is asked to match a page
+    whose intended height is nowhere stated, and a render half again too tall
+    looks no different from a correct one when the two images it compares are
+    at different scales anyway.
+    """
+    from PIL import Image
+
+    if isinstance(source, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(bytes(source)))
+    else:
+        img = Image.open(str(source))
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"source image has no size: {src_w}x{src_h}")
+    return int(width), max(1, round(width * src_h / float(src_w)))
+
+
+def resize_to_width(source: str | os.PathLike | bytes, width: int) -> bytes:
+    """The same image at a given pixel width, so two images can be compared.
+
+    Comparing a 2480px scan with an 800px render asks the model to judge
+    proportions across a 3x scale difference. Putting both at one width makes
+    "too tall" and "too wide" visible instead of inferable.
+    """
+    from PIL import Image
+
+    if isinstance(source, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(bytes(source)))
+    else:
+        img = Image.open(str(source))
+    img.load()
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    if img.width != width and img.width > 0:
+        height = max(1, round(img.height * width / float(img.width)))
+        img = img.resize((width, height), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def transcribe_messages(messages: list) -> str:
+    """Messages as readable text, images reduced to their dimensions.
+
+    The point is to be able to read exactly what a stage was sent. Base64 image
+    payloads are megabytes of noise, so each becomes one line naming its size --
+    which is itself worth seeing, since a scale mismatch between two images is
+    invisible in the prompt text.
+    """
+    from PIL import Image
+
+    out: list[str] = []
+    for message in messages or []:
+        role = message.get("role", "?") if isinstance(message, dict) else "?"
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            out.append(f"--- {role} ---\n{content}")
+            continue
+        images = 0
+        chunks: list[str] = []
+        for part in content or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                chunks.append(str(part.get("text", "")))
+                continue
+            url = (part.get("image_url") or {}).get("url", "")
+            images += 1
+            head, _, b64 = url.partition(",")
+            try:
+                blob = base64.b64decode(b64)
+                size = "x".join(str(n) for n in Image.open(io.BytesIO(blob)).size)
+                chunks.append(f"[image {images}: {size}, {len(blob) / 1024:.0f} KB]")
+            except Exception:  # noqa: BLE001 - a placeholder must never break logging
+                chunks.append(f"[image {images}: unreadable, {head[:40]}]")
+        body = "\n\n".join(c for c in chunks if c)
+        out.append(f"--- {role} ({images} image(s)) ---\n{body}")
+    return "\n\n".join(out)
+
+
 def side_by_side(
     panels: list[tuple[str, bytes | str]], path: str | os.PathLike
 ) -> tuple[Path, list[dict]]:
@@ -159,8 +243,10 @@ def side_by_side(
     Labels must be ASCII: the environment may have no font with wider coverage,
     and a label rendered as boxes is worse than an English one.
 
-    Trailing whitespace is cropped by the same amount on every panel, so the
-    panels stay vertically comparable.
+    Panels are first scaled to a common width. Pasting a 2480px scan beside an
+    800px render made the two impossible to compare -- and made the shared
+    trailing-whitespace crop below meaningless, since a row of pixels meant a
+    different amount of page in each panel.
 
     Returns (path, panel boxes). The boxes let a UI map a point on the composed
     sheet back to a position within one panel.
@@ -174,6 +260,20 @@ def side_by_side(
         else:
             img = Image.open(str(src))
         loaded.append((label, img.convert("RGB")))
+
+    # Scale to the narrowest panel: never upscale, so nothing is blurred to
+    # match something else.
+    common = min(img.width for _, img in loaded)
+    loaded = [
+        (
+            label,
+            img if img.width == common else img.resize(
+                (common, max(1, round(img.height * common / float(img.width)))),
+                Image.LANCZOS,
+            ),
+        )
+        for label, img in loaded
+    ]
 
     keep = min(
         max(_content_bottom(img) for _, img in loaded) + 24,

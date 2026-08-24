@@ -120,6 +120,99 @@ patch는 거부된 라운드보다 나쁘다 — VERIFY가 실제로 일어나�
 되기 때문이다. 단 `find`와 `replace`가 같은 edit(모델이 안 바뀐 줄을 같이 적어
 보낸 경우)은 그것만 버리고 옆의 진짜 수정은 살린다.
 
+## 페이지 크기를 어떻게 맞추나
+
+렌더러는 항상 같은 폭(`renderer.width`, 기본 800px)으로 레이아웃한다. 그래서
+**원본의 종횡비가 목표 높이를 결정한다** — A4 스캔 2480x3508이면 목표는
+800x1132 CSS px다.
+
+이걸 명시하지 않으면 모델은 맞출 수 없다. 이유가 둘이다.
+
+1. **목표 높이를 아무도 안 알려줬다.** 원본 이미지만 보고 "800px 폭에서 높이가
+   1132여야 한다"를 역산하라는 건 무리다.
+2. **비교하는 두 이미지의 배율이 달랐다.** 소스는 `image_max_side`(1600)까지
+   유지되고 렌더는 800px다. 3배 차이나는 두 이미지를 놓고 "어느 쪽이 더
+   길쭉한가"를 판단하라는 셈이었다. `max_side` 는 **긴 변**을 맞추므로 종횡비가
+   다르면 폭이 서로 달라진다 — 축소해서 보는 1·2단계도 같은 문제였다.
+
+그래서 이렇게 한다.
+
+* **목표를 프롬프트에 넣는다.** 모든 호출에 이 블록이 붙는다. 붙이는 곳은
+  `_chat()` 한 곳이라 단계가 빠질 수 없다.
+
+  ```
+  Page size: at this render width the page should be 800 x 1132 CSS pixels
+  (the source's aspect ratio, 1:1.415).
+  The current render is 800 x 1400, 24% taller than it should be.
+  That is a structural mismatch, not a detail: find what accounts for the
+  difference - padding, margins, line height, font sizes, a row or block that
+  should not be there - and fix that. Do not scale or stretch anything to hit
+  the number.
+  ```
+
+  현재 높이는 `probe` 가 돌려주는 `metrics.page.height` 다. 차이가 3% 미만이면
+  "matches" 로만 적고 지적하지 않는다.
+* **비교용 이미지는 렌더와 같은 폭으로 맞춘다.** PLAN·ACTION·VERIFY 는 소스를
+  `_ref()` 로 800px 폭에 맞춰 보낸다. 1·2단계의 `_rough()` 는 긴 변이 아니라
+  **폭**을 기준으로 줄인다.
+* **`compare.png` 도 마찬가지다.** `side_by_side` 가 패널을 가장 좁은 폭에 맞춰
+  스케일한다(확대는 안 한다). 2480px 스캔을 800px 렌더 옆에 원본 크기로 붙이면
+  사람도 비교할 수 없고, 아래쪽 여백을 같은 양만큼 잘라내던 것도 의미가 없었다.
+
+**늘이거나 `transform: scale` 로 맞추라고 하지 않는다.** 높이가 안 맞는 건 패딩·
+행간·글자 크기·없어야 할 블록 중 하나가 원인이므로, 그 원인을 고치게 한다.
+
+## 모든 LLM 호출이 기록된다
+
+`out/<이름>/llm/` 에 호출 순서대로 한 파일씩 남는다.
+
+```
+out/sample/llm/
+  001_skeleton.txt
+  002_skeleton_check.txt
+  003_fill-1.txt  004_fill-2.txt  005_fill-3.txt
+  006_plan.txt
+  007_action-patch.txt
+  008_verify.txt
+```
+
+각 파일에 **보낸 프롬프트 전문과 받은 응답 전문**이 들어 있다.
+
+```
+=== call 6  stage=plan  thinking=True ===
+
+--- system ---
+You are a meticulous visual diff analyst.
+
+--- user (2 image(s)) ---
+You are improving an HTML recreation of a document image.
+...
+Page size: at this render width the page should be 800 x 1132 CSS pixels ...
+
+[image 1: 800x1132, 214 KB]
+
+[image 2: 800x1400, 187 KB]
+
+=== reasoning (1204 chars) ===
+...
+
+=== response  finish=stop  139 chars ===
+{"scope": "local", "target": "...", ...}
+```
+
+이미지는 base64 대신 **크기 한 줄**로 남는다. 파일이 읽을 수 있는 크기로
+유지되고, 무엇보다 **두 이미지의 배율이 같은지가 그 줄에서 바로 보인다.**
+호출이 실패하면 프롬프트는 그대로 남고 `=== FAILED ===` 가 붙는다.
+
+터미널·`run.log` 에는 호출마다 한 줄씩 남는다.
+
+```
+TARGET: the page should render 800x1132 CSS px (source aspect 1:1.415)
+[plan] prompt: 2914 chars -> 006_plan.txt
+[plan] LLM call attempt 1/3 (thinking=True)
+[plan] ok: 139 chars, finish=stop, tokens=1841/46
+```
+
 ## 요구 사항
 
 * **Python 3.8 이상.** 필수 외부 의존성은 Pillow 하나뿐이다
@@ -189,6 +282,7 @@ out/sample/
   final_verify.json   마지막 VERIFY 판정
   summary.json        라운드별 결정 요약
   run.log
+  llm/                호출별 프롬프트 전문과 응답 전문 (001_skeleton.txt ...)
   rounds/
     bootstrap.html  bootstrap.png          최종 초안 (3단계를 다 거친 결과)
     bootstrap_metrics.json  bootstrap_stages.json
@@ -598,7 +692,7 @@ Already tried without success:
   계약과 `probe_js`의 실제 브라우저 동작, ACTION 입출력 잘림 처리, 사람 개입
   전 경로와 그 기록, 검토 UI의 HTTP 왕복·경로 제한·실행 중 설정 전환, 영역
   지정이 확대 crop으로 ACTION까지 가는 경로, VERIFY 판단이 다음 PLAN으로
-  전달되는 경로. `python3 tests/test_offline.py` 로 141개 검사가 재현된다.
+  전달되는 경로. `python3 tests/test_offline.py` 로 151개 검사가 재현된다.
 * **부분 검증** — 실제 문서 한 장으로 2라운드를 돌려 원본 대비 불일치 픽셀이
   7.17% → 5.35% → 4.91% 로 줄어드는 것을 확인했다. 단 그때 VLM 역할은 Qwen이
   아니었으므로 수렴이 가능하다는 것까지만 말할 수 있다.
@@ -701,6 +795,13 @@ candidate rejected: ACTION hit max_tokens (32768); the rewrite is truncated
  thinking="judging" gives generating stages the whole of it)
 ```
 
+`max_tokens` 는 **모든 단계가 같은 값**(`llm.max_tokens`, 기본 32768)을 쓴다.
+단계별로 나눠 배정하지 않는다 — 예산이 아니라 **상한**이라서, PLAN처럼 JSON 몇
+줄만 내는 단계가 32768을 들고 있어도 낭비가 아니다. 실제로 걸리는 곳은 **전문을
+내야 하는 단계 하나뿐**이다: `rewrite` 모드의 ACTION(그리고 `--bootstrap single`).
+거기서만 reasoning과 HTML이 같은 32768을 나눠 쓴다. `section`·`patch`·`fill` 은
+응답이 블록·치환 크기라서 여유가 크다.
+
 `rejected` 가 늘고 `mode` 가 `rewrite`·`section` 이면 `--thinking judging` 으로
 바꿔 본다. 판단 단계(PLAN / CHECK / VERIFY)는 어느 모드에서도 항상 켜져 있다 —
 거기서는 reasoning이 곧 그 단계의 일이다.
@@ -725,8 +826,8 @@ thinking 결정은 `Pipeline.thinking_for()` 한 곳에서만 하고, 모든 모
 python3 tests/test_offline.py
 ```
 
-mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 141개가
-21개 그룹으로 나뉘어 다루는 범위:
+mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. 검사 151개가
+22개 그룹으로 나뉘어 다루는 범위:
 
 * 산출물 구조와 keep / revert / reject / done 동작, revert가 이전 HTML을 실제로
   복원하는지
@@ -766,6 +867,11 @@ mock renderer와 mock Qwen을 in-process로 띄워 전체 build를 돌린다. �
   찾는지, 중복 id·마커 유실·같은 태그 중첩을 거부하는지, 블록 하나가 실패해도
   나머지가 채워지는지, 레이아웃 불일치가 글자를 채우기 전에 고쳐지는지,
   `--bootstrap single` 이 예전 1회 호출로 되돌아가는지
+* 배율과 호출 기록 — 원본 종횡비에서 목표 높이가 나오는지, 2480px 스캔이 렌더
+  폭으로 맞춰지는지, `side_by_side` 가 패널을 한 폭으로 스케일하면서 높이 차이는
+  남기는지, `page_size_block` 이 목표와 (3% 넘는) 차이만 지적하는지, 모든 호출이
+  기록되고 그 안에 프롬프트·이미지 크기·응답이 있고 base64는 없는지, 비교 단계
+  (CHECK·PLAN·VERIFY)가 받은 이미지들의 폭이 전부 같은지
 * 문서와 코드의 일치 — README가 인용한 운영자 계약 블록이 실제 프롬프트와 같은지,
   scope→모드 표의 각 줄이 라우터와 맞는지, `[bootstrap]` 기본값 표가 코드의
   기본값과 같은지, README가 쓰라고 한 CLI 플래그가 실제로 있는지, thinking on/off

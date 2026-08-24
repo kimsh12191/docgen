@@ -1842,7 +1842,9 @@ def test_docs_match_the_code() -> None:
     direct = [line.strip() for line in source.splitlines()
               if "self.llm.chat(" in line and "def _chat" not in line]
     assert len(direct) == 1, f"_chat 을 우회하는 호출: {direct}"
-    assert "thinking=self.thinking_for(stage)" in direct[0], direct[0]
+    assert "thinking=thinking" in direct[0], direct[0]
+    assert "thinking = self.thinking_for(stage)" in source, \
+        "_chat 이 thinking_for 로 값을 정하지 않는다"
     ok("every stage calls the model through the one place thinking is decided")
 
     for mode in ("all", "judging"):
@@ -1850,6 +1852,108 @@ def test_docs_match_the_code() -> None:
     for stage in ("SKELETON", "CHECK", "FILL", "PLAN", "VERIFY"):
         assert stage in readme, f"README의 thinking 표에 {stage} 가 없다"
     ok("the README documents both thinking modes and every stage in them")
+
+
+# --------- 22. the two images are the same scale, and every call is on the record
+
+def test_scale_and_call_log(llm_base: str, renderer_url: str) -> None:
+    """A scan and an 800px render were being compared across a 3x scale gap."""
+    print("\n[22] 두 이미지가 같은 배율이고, 모든 호출이 기록된다")
+    import io
+    import shutil
+
+    from PIL import Image
+
+    import prompts
+    from pipeline import Pipeline
+    from utils import resize_to_width, side_by_side, target_page_size
+
+    def png(w: int, h: int, shade: int = 200) -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), (shade, shade, shade)).save(buf, "PNG")
+        return buf.getvalue()
+
+    # 1. The height the recreation is aiming for comes from the source's ratio.
+    a4 = png(2480, 3508)
+    assert target_page_size(a4, 800) == (800, 1132), target_page_size(a4, 800)
+    assert target_page_size(png(1000, 500), 800) == (800, 400)
+    ok("target_page_size turns the source's aspect ratio into a CSS-pixel height")
+
+    scaled = Image.open(io.BytesIO(resize_to_width(a4, 800)))
+    assert scaled.size == (800, 1132), scaled.size
+    ok(f"resize_to_width puts a 2480px scan at the render's width: {scaled.size}")
+
+    # 2. The human-facing comparison used to paste them at native size.
+    out_png, panels = side_by_side(
+        [("1. SOURCE", a4), ("2. BEFORE", png(800, 1400)), ("3. AFTER", png(800, 1200))],
+        ROOT / "out" / "scale_probe" / "compare.png",
+    )
+    widths = {p["width"] for p in panels}
+    assert widths == {800}, f"panels are not one width: {panels}"
+    heights = [p["height"] for p in panels]
+    assert heights[0] != heights[1], "the height difference vanished"
+    ok(f"side_by_side scales panels to one width, heights stay comparable: {heights}")
+
+    # 3. The prompt block that states the number.
+    assert "Aim for that height" in prompts.page_size_block((800, 1131))
+    off = prompts.page_size_block((800, 1131), 1400)
+    assert "24% taller" in off, off
+    assert "Do not scale or stretch" in off, off
+    assert "which matches" in prompts.page_size_block((800, 1131), 1140)
+    ok("page_size_block states the target, and the gap only when it is real")
+
+    # 4. End to end: what each stage was actually sent.
+    cfg = load_config()
+    cfg.llm.base_url = llm_base
+    cfg.llm.timeout = 30
+    cfg.renderer.url = renderer_url
+    cfg.renderer.timeout = 30
+    cfg.loop.max_rounds = 1
+
+    out = ROOT / "out" / "call_log"
+    if out.exists():
+        shutil.rmtree(out)
+    mock_services.LLMHandler.plan_calls = 0
+    mock_services.LLMHandler.skeleton_checks = 0
+    pipe = Pipeline(cfg, out)
+    pipe.build(make_source_png(Path("tmp/source_fixture.png")))
+
+    logs = sorted((out / "llm").glob("*.txt"))
+    assert logs, "no call transcripts were written"
+    stages = [f.stem.split("_", 1)[1] for f in logs]
+    for expected in ("skeleton", "skeleton_check", "plan", "verify"):
+        assert expected in stages, f"{expected} 호출 기록이 없다: {stages}"
+    ok(f"{len(logs)} calls on the record: {', '.join(stages)}")
+
+    for f in logs:
+        body = f.read_text()
+        assert "=== call " in body and "stage=" in body and "thinking=" in body, f.name
+        assert "=== response" in body or "=== FAILED" in body, f.name
+        # Base64 payloads would make these files unreadable and enormous.
+        assert "data:image/png;base64" not in body, f"{f.name} 에 base64가 들어갔다"
+        assert "[image 1:" in body or "0 image(s)" in body, f.name
+    ok("every transcript holds the prompt, the images as sizes, and the reply")
+
+    # 5. The images a comparison stage receives must be one width.
+    import re
+
+    def sizes(name: str) -> list[tuple[int, int]]:
+        body = next(f for f in logs if f.stem.endswith(name)).read_text()
+        return [
+            (int(w), int(h))
+            for w, h in re.findall(r"\[image \d+: (\d+)x(\d+)", body)
+        ]
+
+    for stage in ("skeleton_check", "plan", "verify"):
+        found = sizes(stage)
+        assert len(found) >= 2, (stage, found)
+        assert len({w for w, _ in found}) == 1, f"{stage} 이미지 폭이 다르다: {found}"
+        ok(f"{stage} received {len(found)} images, all {found[0][0]}px wide")
+
+    # 6. And the fact itself reached the prompt.
+    plan_body = next(f for f in logs if f.stem.endswith("plan")).read_text()
+    assert "Page size: at this render width" in plan_body, "PLAN이 목표 크기를 못 받았다"
+    ok("the page-size fact is in the prompt, not left to be inferred")
 
 
 def main() -> int:
@@ -1877,6 +1981,7 @@ def main() -> int:
     test_section_mode(llm_base, renderer_url)
     test_staged_bootstrap(llm_base, renderer_url)
     test_bootstrap_does_not_touch_the_loop(llm_base, renderer_url)
+    test_scale_and_call_log(llm_base, renderer_url)
     test_docs_match_the_code()
     # The README states this number. Counting this check itself keeps the two
     # from drifting: change the suite, the number in the doc has to follow.

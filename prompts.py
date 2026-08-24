@@ -315,6 +315,41 @@ OPERATOR_CONTRACT = """A human operator is taking part in this loop, so some of 
 The operator is looking at the same images you are. Prefer their input over your own earlier reasoning, but never over what the current images plainly show. If their input contradicts the images, say so rather than following it blindly."""
 
 
+
+def page_size_block(target: tuple, rendered_height=None, tolerance: float = 0.03) -> str:
+    """The page height the recreation is aiming for, and how far off it is.
+
+    The renderer lays out at a fixed width, so the source's aspect ratio fixes
+    the height -- but nothing told the model that number, and the two images it
+    compares can be at different scales, which hides the error entirely. A page
+    a third too tall is a structural fault, so it is stated as one.
+    """
+    width, height = int(target[0]), int(target[1])
+    lines = [
+        f"Page size: at this render width the page should be {width} x {height} "
+        f"CSS pixels (the source's aspect ratio, 1:{height / width:.3f})."
+    ]
+    if rendered_height:
+        now = round(float(rendered_height))
+        off = (now - height) / float(height)
+        if abs(off) >= tolerance:
+            word = "taller" if off > 0 else "shorter"
+            lines.append(
+                f"The current render is {width} x {now}, {abs(off) * 100:.0f}% {word} "
+                f"than it should be."
+            )
+            lines.append(
+                "That is a structural mismatch, not a detail: find what accounts "
+                "for the difference - padding, margins, line height, font sizes, a "
+                "row or block that should not be there - and fix that. Do not "
+                "scale or stretch anything to hit the number."
+            )
+        else:
+            lines.append(f"The current render is {width} x {now}, which matches.")
+    else:
+        lines.append("Aim for that height.")
+    return "\n".join(lines)
+
 def region_block(region: dict) -> str:
     """Tells ACTION that the last two images are a zoom of a marked area."""
     return (
